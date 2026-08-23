@@ -3,4 +3,6 @@ node_modules/
 .context/
 .exploratory/
 .review-loop/
-findings/
+
+# findings/ is deliberately NOT ignored — the skills require CR/ET records to be
+# tracked, including for reviews run against this repo.
