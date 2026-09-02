@@ -4,12 +4,13 @@ Project-agnostic agent skills for reviewing, testing, and hardening software.
 Written for [Claude Code](https://claude.com/claude-code), usable by any agent
 harness that loads Markdown skills.
 
-Three skills, designed to compose:
+Available skills:
 
 | Skill | What it does |
 | --- | --- |
 | [`infi-code-review`](skills/infi-code-review) | Multi-reviewer defect hunt over a diff. Fans out focused read-only reviewers, verifies findings against counterexamples, ranks them `P0`–`P3` from a severity × frequency matrix, and leaves a durable `findings/CR<N>.md` record. |
 | [`infi-exploratory-testing`](skills/infi-exploratory-testing) | Multi-agent exploratory testing against a live app. Parallel walkers drive real scenarios and capture screenshot + accessibility evidence; a blind reviewer panel judges that evidence through five lenses; findings land ranked in `findings/ET<N>.md`. |
+| [`infi-fix-planning`](skills/infi-fix-planning) | The counterpart of `infi-code-review`: turns a `CR<N>.md` findings report into root-cause fix plans with alternatives and net-LOC estimates, gates them on a one-line human decision sheet, then implements, adversarially verifies, and records the round in a per-PR `findings/FIXES-PR<id>.md` ledger. Invoked repeatedly, alternating with reviews, until no P0/P1 remains. |
 | [`infi-review-loop`](skills/infi-review-loop) | The outer loop. Alternates capacity-scheduled review rounds (code review, exploratory, static, quality, docs) with fix rounds until the agreed stopping bars are met — or a cap or oscillation guard stops it. |
 
 ## Why these exist
