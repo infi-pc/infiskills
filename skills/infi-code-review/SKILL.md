@@ -105,6 +105,13 @@ Give every reviewer the diff, inferred intent, changed-file list, the Phase-0
 project calibration facts, scope contract if in loop mode, and assigned focus or
 lens group. They return findings only — no fixes, no summaries.
 
+Hand them the finding contract including `headline` and `summary`, and tell them
+plainly: state the *effect* first, in words someone who has not opened the file
+can follow, and keep the mechanism, call chain and identifiers in `why`. A
+reviewer that reports only a mechanism (`X conflates A and B`) forces you to
+reconstruct the consequence from scratch, and reconstructions are where wrong
+severity comes from.
+
 Always cover these lenses (this requires four reviewer processes only in
 full-capacity mode):
 
@@ -174,11 +181,65 @@ Each finding includes:
   with explicit acceptance or follow-up), `non_blocking`.
 - `blast_radius`: `single-user`, `tenant`, `all-users`, `ops-only`,
   `developer-only`, or `unknown`.
-- `file:line`, a one-clause `title`, `why` (observable impact, not style),
-  `fix` (concrete recommendation).
+- `headline`: the defect in **plain words**, ≤ 8 words, as a claim. This is what
+  a reader skims, so it names the consequence, not the mechanism.
+- `summary`: one or two sentences saying what goes wrong, under what
+  circumstances, and what the reader would observe. Together with the headline
+  and the sites this is the whole Issue cell — it must stand on its own without
+  the detail bullet.
+- `sites`: the `file:line` locations, rendered on their own line **below** the
+  summary inside the Issue cell — never as a separate table column. A narrow
+  column wraps a long path into a vertical stack of character fragments that is
+  both unreadable and wider than the path itself. One line, comma-separated,
+  most relevant first; list several when a cluster genuinely spans sites and
+  cap it at three, leaving the rest to the **Invariant** bullet.
+- `why` (observable impact, not style), `fix` (concrete recommendation).
 - `confidence`: `50` plausible but not fully provable · `75` verified against
   surrounding code, likely affects real usage · `100` mechanically certain
   from code, tests, types, or an explicit project rule.
+
+### Writing the Issue text
+
+Write for a developer who knows **what the change is for** but has never opened
+these files. They cannot resolve a private identifier, a helper name, or an
+internal flag from memory — a headline built out of those is unreadable to
+everyone except the author, which is precisely the audience that does not need
+the review.
+
+So: lead with the effect, then explain the mechanism only as far as the reader
+needs it to judge the finding. Reviewers hand you the mechanism; converting it
+to audience-facing language is **your** job as orchestrator, and you do it in the
+first draft rather than on request.
+
+Rules that carry most of the weight:
+
+- **Headline = consequence.** What breaks, who notices. Never open with a bare
+  symbol name as the subject.
+- **Name symbols only when they are the clearest available words**, and only
+  after the effect is established. The location line already tells the reader
+  where to look, so the text rarely needs the identifier at all.
+- **Put the location last, on its own line.** It is a jump target, not part of
+  the sentence — a reader scanning for meaning should hit the claim first and
+  reach the path only once they have decided they care.
+- **Say when it happens.** A finding with no triggering condition reads as
+  either always-broken or hypothetical. The condition is already in your `F`
+  measurement — reuse it.
+- **Prefer the observable to the internal.** "the widget opens on a different
+  day" beats "`dateToPreselect` is withheld".
+- **Do not restate the fix as the issue**, and do not compress two sentences of
+  mechanism into one unreadable one. Mechanism detail belongs in the bullet.
+- **Say if the cause pre-dates the diff** when the diff only adds instances of
+  it, so the reader can price it correctly.
+
+Before → after, on real findings:
+
+| Don't (mechanism-first, unreadable cold) | Do (effect-first, stands alone) |
+| ---------------------------------------- | ------------------------------- |
+| `contradictedByGrid` conflates "denied" with "not in view" | **Visitor's chosen date is silently dropped.** If they page to a different month before hitting Search, the block decides its calendar never confirmed the date and sends nothing downstream — so checkout opens on a day of its own choosing, while the UI still shows the visitor's date. |
+| Dropping destination/category for picked ids removes the only fallback scope | **Picked-products block can open checkout against the whole catalogue.** Choosing specific products drops the category scope. If those products later fail to load, nothing is left to fall back on, so checkout opens unfiltered. |
+| `normalizeProductIds` sorts before slicing | **Past 50 picks, the wrong products get dropped.** The list is sorted before being trimmed to 50, so the survivors are whichever ids sort lowest — effectively random for UUIDs. An author's first pick can vanish while their 55th survives. |
+| Missing baselines for the new template id | **New test template ships without its screenshots.** It needs three baseline images that are not in the branch, so three visual tests fail on every run. That leg is advisory, so it will not block the merge button — it just stays red on every future PR. |
+| `expect(requests).toEqual([])` is racy | **The headline perf claim is guarded by a test that can pass vacuously.** "No request was made" is asserted immediately, with nothing making it wait for a request that may still be on its way. |
 
 Suppress findings that are: style issues a formatter/linter would own; generic
 "consider" advice without a concrete failure mode; pre-existing issues not made
@@ -244,9 +305,9 @@ test gaps or risks. Group by `### 🔥 P0 — Critical`, `### 🔴 P1 — High`,
 
 ### 🔴 P1 — High
 
-| #   | File            | Issue                   | Gate   | S/F → P    | Blast radius | Reviewer | Confidence |
-| --- | --------------- | ----------------------- | ------ | ---------- | ------------ | -------- | ---------- |
-| 1   | `path/f.ts:42`  | Missing ownership check | blocks | S1/F1 → P1 | tenant       | security | 100        |
+| #   | Issue                                                                                                                                                                                                                             | Gate   | S/F → P    | Blast radius | Reviewer | Confidence |
+| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- | ------------ | -------- | ---------- |
+| 1   | **Anyone can read another customer's invoices.** The endpoint checks that you are signed in but never that the invoice is yours, so changing the id in the URL is enough.<br>`app/api/invoices/[id]/route.ts:42`, `lib/auth/guard.ts:88` | blocks | S1/F1 → P1 | tenant       | security | 100        |
 
 - **#1** — **Impact:** <observable impact>. **Invariant:** <guarantee broken;
   other sites in the cluster, if any>. **Checked:** <counterexample inspected>.
@@ -266,11 +327,22 @@ test gaps or risks. Group by `### 🔥 P0 — Critical`, `### 🔴 P1 — High`,
 
 Rules:
 
-- Keep table issue text short; put explanation in keyed bullets with bold
-  labels in this order: **Impact**, **Invariant**, **Checked**, **Proof**,
+- The Issue cell is `**headline.** summary<br>`file:line`` per *Writing the
+  Issue text* — a bold plain-words claim, one or two sentences a reader can act
+  on without opening the file, then the location(s) on their own line. Three or
+  four lines of table cell is the right size; a terse fragment that only the
+  author can parse is not. Everything past that — mechanism, call chain,
+  identifiers, the counterexample you ruled out — goes in the keyed bullet, with
+  bold labels in this order: **Impact**, **Invariant**, **Checked**, **Proof**,
   **Fix**.
-- A root-cause cluster is one numbered finding: lead site in the table, every
-  other symptom site in the **Invariant** bullet, severity/frequency taken
+- **There is no `File` column.** Locations live in the Issue cell (see `sites`).
+  Keep the remaining columns to the ones that are short by nature — `#`, `Gate`,
+  `S/F → P`, `Blast radius`, `Reviewer`, `Confidence` — so the Issue cell gets
+  the width, and drop `Blast radius`/`Reviewer` from lower-priority tables when
+  they add nothing.
+- A root-cause cluster is one numbered finding: the lead site first in the cell's
+  location line, the other symptom sites after it (up to three) with the full
+  list and the reasoning in the **Invariant** bullet, severity/frequency taken
   from the worst symptom.
 - Never strip the triple: every finding carries `S<n>/F<n> → P<n>` in the
   table, the CR record, and any prose or handoff that names it. Sections
@@ -279,7 +351,8 @@ Rules:
   `CR<N>-2`, ... in the CR file). In loop mode, preserve handed existing IDs
   and use round-local candidate IDs for new artifact findings; the loop
   orchestrator assigns their durable CR IDs.
-- Exact file and line for every code finding. No time estimates.
+- Exact file and line for every code finding, inside the Issue cell. No time
+  estimates.
 - Do not apply fixes unless explicitly asked. If asked to fix a P0 or
   confidence-100 P1, write the red failing test first, then make it green.
 - Standalone runs: after writing the CR file, summarize for the requester —
@@ -293,3 +366,11 @@ Rules:
 Before delivering, re-check that every finding is actionable, diff-related,
 accurately cited, severity-calibrated, plausible to fix in this codebase, and
 not duplicate, speculative, or lint-only.
+
+Then read the Issue column once as the recipient, not as the author: for each
+row, would a developer who knows the change's purpose but has never opened that
+file understand what breaks and when, from the cell alone? Any row whose subject
+is a bare identifier, or that only makes sense if you already know the
+implementation, gets rewritten now — not when someone asks for it. The table is
+what most readers will read; a finding they cannot parse is a finding you did
+not report.
