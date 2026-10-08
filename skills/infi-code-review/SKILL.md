@@ -1,6 +1,6 @@
 ---
 name: infi-code-review
-description: Multi-reviewer code review of a diff (PR, branch, commit range, or working tree) that fans out focused read-only subagents (correctness, testing, maintainability, security, performance, ...), verifies findings against counterexamples, and produces a priority-ranked report (P0-P3 computed from a severity × frequency risk matrix, findings carry the full S/F → P triple) plus a durable findings/CR<N>.md record. Use whenever asked to review code, review a PR/branch/diff/commit, check whether a change is merge-ready, or find defects in changed code — and as the code-review track inside the infi-review-loop skill.
+description: Review a PR, branch, commit range, or working tree with independent reviewers. Verify defects and maintenance costs against supported workflows, calibrate risk and merge gates, and produce an evidence-backed findings report. Use for code reviews, merge-readiness assessments, and the code-review track inside infi-review-loop.
 ---
 
 # Code review
@@ -9,6 +9,11 @@ Find real, actionable defects in changed code. Prefer a short, high-signal
 report over exhaustive commentary. You are the **review orchestrator**: you
 scope the diff, fan out focused reviewer subagents, then verify and synthesize
 their findings yourself. Reviewers find; you judge.
+
+Read [the shared review contract](references/review-contract.md) before
+calibration. It defines finding evidence, risk, dispositions, status ownership,
+and closure. Protect supported workflows and keep future changes easy; the
+number of findings is not a success metric.
 
 This skill is project-agnostic. Everything it needs to know about *this* project
 — test commands, conventions, the default branch, where findings live — is
@@ -20,8 +25,10 @@ Before dispatching anyone, establish these five facts and carry them into every
 reviewer prompt. Get them from files and commands, not by reading source into
 your own context.
 
-1. **Default branch** — `git symbolic-ref refs/remotes/origin/HEAD` or
-   `gh repo view --json defaultBranchRef`. Fall back to `main`.
+1. **Review base** — explicit user/workspace base, then the PR's actual base,
+   then `git symbolic-ref refs/remotes/origin/HEAD` or
+   `gh repo view --json defaultBranchRef`. Fall back to `main` only if no base
+   is available; record the assumption.
 2. **Project instructions** — read whichever of `CLAUDE.md`, `AGENTS.md`,
    `CONTRIBUTING.md`, `.cursorrules`, or `docs/` conventions files exist at the
    repo root or in the changed packages. These define the `project-standards`
@@ -29,8 +36,9 @@ your own context.
 3. **Stack and gates** — infer the language/framework and the project's own
    checks from `package.json` scripts, `Makefile`, `justfile`,
    `pyproject.toml`, `Cargo.toml`, `go.mod`, or the CI workflow files. You do
-   not run them (that is the review-loop's `static` track), but reviewers need
-   to know what the project considers a violation.
+   not duplicate full-suite runs owned by a loop's `static` track. Targeted
+   read-only repro commands are appropriate when needed to establish a finding;
+   record exactly what ran and follow project rules for starting services.
 4. **Findings directory** — default `findings/` at the repo root. If the project
    instructions name a different location for review records, use that. If the
    project is not a git repo or is read-only, say so and skip the durable record.
@@ -43,13 +51,17 @@ report format defined below.
 
 ## Scope
 
-1. If a PR, branch, or `base:<ref>` is provided, review that diff; otherwise
-   review the current branch against its merge base with the default branch.
+1. Review the requested diff against the resolved base. Record the base and
+   candidate hashes, plus a snapshot of relevant uncommitted work. Distinguish
+   the full candidate range from any focused verification delta.
 2. Do not switch branches, push, open PRs, or file tickets.
 3. Review tracked changes by default. Mention untracked files only if they
    appear relevant.
 4. Infer intent from the request, PR title/body, recent commits, plan docs, and
-   the diff. Do not block on questions unless scope is impossible to infer.
+   the diff. State supported workflows, known limitations, and unresolved
+   contract questions. Do not infer new platform, trust, or concurrency
+   guarantees from a hypothetical edge case. Do not block on questions unless
+   scope is impossible to infer.
 5. **Loop mode:** when invoked by the `infi-review-loop` skill you will be handed
    a scope contract, round label, immutable round input head, exact full
    candidate range, an optional previous-round focused delta, an existing
@@ -62,15 +74,18 @@ report format defined below.
    findings round-local candidate IDs for the loop orchestrator to map. End
    your reply with the raw findings table. The loop orchestrator alone merges
    the artifact into the run's preallocated durable CR record and owns stable
-   ID allocation, resolution labels, and fixing commit hashes.
+   ID allocation, resolution labels, and fixing commit hashes. When handed
+   pending closures, return an explicit verdict for each under the shared
+   closure contract; do not treat an unreported finding as verified.
 
 ## Durable record — standalone mode
 
 Outside review-loop mode, every review leaves a tracked record: scan the
 findings directory for `CR*.md`, allocate the next number above the highest
 existing suffix (never fill gaps or overwrite), and write `findings/CR<N>.md`
-before your final response. Follow-ups to the same review update that file —
-including recording which findings were later fixed, with the fixing commit.
+before your final response. Follow-ups append revision-specific evidence while
+preserving the earlier review. Current fix status belongs to the FIXES ledger
+when one exists; link it rather than maintaining a second status table.
 
 The record is the primary handoff, so it must stand alone: review date, exact
 scope/base/head or commit identifiers, the verdict, what coverage or validation
@@ -103,7 +118,9 @@ reviewers by that mode:
 
 Give every reviewer the diff, inferred intent, changed-file list, the Phase-0
 project calibration facts, scope contract if in loop mode, and assigned focus or
-lens group. They return findings only — no fixes, no summaries.
+lens group. Include the shared evidence/risk definitions and any pending closure
+assignment. They return findings with provisional directions, requested closure
+verdicts, and concrete optional proposals; no source edits or unrelated summaries.
 
 Hand them the finding contract including `headline` and `summary`, and tell them
 plainly: state the *effect* first, in words someone who has not opened the file
@@ -118,8 +135,12 @@ full-capacity mode):
 - **correctness** — logic bugs, edge cases, state, error handling, intent
   mismatch.
 - **testing** — missing or weak tests for changed behavior.
-- **maintainability** — unnecessary complexity, coupling, dead code, risky
-  abstractions.
+- **maintainability** — demonstrate the cost of an ordinary future change:
+  caller preconditions, duplicated decisions, repeated conversions, coordinated
+  states, or unclear ownership. Explain what a simpler boundary would hide and
+  which obligations disappear. Size is a search hint, not proof of a defect.
+  Keep optional redesign proposals separate from demonstrated defects; include
+  maintenance costs introduced by fixes from earlier rounds.
 - **project-standards** — violations of the project instruction files found in
   Phase 0, plus the project's conventions, type discipline, i18n and
   design-system rules, and layering rules.
@@ -145,42 +166,12 @@ Add focused reviewers only when the diff warrants them:
 
 ## Finding contract
 
-Each finding includes:
+Use the evidence fields and S/F → P matrix in
+[the shared contract](references/review-contract.md). In particular, report
+the guarantee's basis, recovery, reach evidence, and a reason for the merge
+gate. These facts belong in the summary and evidence bullets, not more wide
+table columns. Apply these presentation rules:
 
-- `severity` (S): how bad one hit is — `S0` data loss/corruption, exploitable
-  vulnerability, critical breakage · `S1` user-facing bug, contract break,
-  serious operational risk · `S2` meaningful edge case, performance issue,
-  maintainability trap, missing coverage · `S3` low-risk polish.
-- `frequency` (F): how often realistic usage crosses the failure path —
-  `F0` every-use (normal use of the feature hits it) · `F1` common (typical
-  workflows hit it regularly) · `F2` occasional (specific but realistic
-  conditions) · `F3` rare (unusual timing, narrow race, exotic state).
-  Derive it from the triggering conditions, not gut feel: name what must be
-  true for the path to execute. Severity and frequency are independent
-  measurements; neither is ever adjusted to get a nicer priority.
-- `priority` (P): computed from the standard risk matrix, never assigned by
-  feel:
-
-  |        | F0 | F1 | F2 | F3 |
-  | ------ | -- | -- | -- | -- |
-  | **S0** | P0 | P0 | P0 | P0 |
-  | **S1** | P0 | P1 | P1 | P2 |
-  | **S2** | P1 | P2 | P2 | P3 |
-  | **S3** | P2 | P3 | P3 | P3 |
-
-  The S0 row never discounts — rare data loss is still P0. `S1/F0` promotes —
-  a bug every user hits every session is drop-everything. The three metrics
-  travel together **everywhere** — tables, CR records, prose, fixer handoffs —
-  written `S<n>/F<n> → P<n>`; a bare `P1` hides whether it is a rare
-  catastrophe or a constant paper cut, and that difference decides the fix.
-- `invariant`: one clause naming the guarantee the code breaks ("a save
-  receipt is retired only after bytes are durably persisted"). This is the
-  clustering key for root-cause analysis — symptoms share an invariant, not
-  necessarily a file.
-- `merge_gate`: `blocks` (must fix before merge), `conditional` (merge only
-  with explicit acceptance or follow-up), `non_blocking`.
-- `blast_radius`: `single-user`, `tenant`, `all-users`, `ops-only`,
-  `developer-only`, or `unknown`.
 - `headline`: the defect in **plain words**, ≤ 8 words, as a claim. This is what
   a reader skims, so it names the consequence, not the mechanism.
 - `summary`: one or two sentences saying what goes wrong, under what
@@ -193,10 +184,6 @@ Each finding includes:
   both unreadable and wider than the path itself. One line, comma-separated,
   most relevant first; list several when a cluster genuinely spans sites and
   cap it at three, leaving the rest to the **Invariant** bullet.
-- `why` (observable impact, not style), `fix` (concrete recommendation).
-- `confidence`: `50` plausible but not fully provable · `75` verified against
-  surrounding code, likely affects real usage · `100` mechanically certain
-  from code, tests, types, or an explicit project rule.
 
 ### Writing the Issue text
 
@@ -274,22 +261,26 @@ Before reporting:
    cause-level — restore the invariant — not a per-site patch. Then hunt the
    cluster's *missing* symptoms: walk the other code paths that touch the same
    invariant (other callers, the composed/manual variant of an automatic path,
-   error branches) and check whether they violate it too. A cluster reported
-   with only the symptoms that happened to be found is how "fixed" bugs come
-   back under a new repro.
+   error branches) and check whether they violate it too. Bound the sweep to
+   that supported guarantee and identify unexamined entry points; an abstract
+   pattern match elsewhere does not automatically join the release scope.
 3. Run a counterexample check: identify what nearby code path, guard, caller,
    middleware, test, or config would make the finding false, then inspect it.
 4. Verify each surviving finding against the code yourself.
 5. For every P0 and confidence-100 P1, include proof: a `red_test` (failing
    test to add before the fix), a `repro` (exact manual/API/UI steps, command,
    query, or observability check), or `reason_unprovable`. If no proof is
-   available, reconsider severity or confidence.
+   available, lower confidence or state the missing evidence; severity still
+   describes the consequence if the claim holds. Do not imply a proposed test
+   or an unexecuted reproduction has failed in practice.
 6. Drop findings below confidence 75, except important P0/P1 risks worth
    surfacing with explicit uncertainty.
 7. Separate pre-existing issues from diff-introduced issues.
 8. Recalibrate severity, frequency, and merge gate after deduplication, then
    recompute priority from the matrix; sort by priority, then confidence,
-   then file path.
+   then file path. A costly fix does not lower severity. Give explicit closure
+   verdicts for any handed pending findings; distinguish new evidence from a
+   changed guarantee before calling a previous fix unsuccessful.
 
 ## Report format
 
@@ -309,9 +300,12 @@ test gaps or risks. Group by `### 🔥 P0 — Critical`, `### 🔴 P1 — High`,
 | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ | ---------- | ------------ | -------- | ---------- |
 | 1   | **Anyone can read another customer's invoices.** The endpoint checks that you are signed in but never that the invoice is yours, so changing the id in the URL is enough.<br>`app/api/invoices/[id]/route.ts:42`, `lib/auth/guard.ts:88` | blocks | S1/F1 → P1 | tenant       | security | 100        |
 
-- **#1** — **Impact:** <observable impact>. **Invariant:** <guarantee broken;
+- **#1** — **Impact:** <observable impact, recovery, reach and its evidence>.
+  **Invariant:** <guarantee broken, its basis;
   other sites in the cluster, if any>. **Checked:** <counterexample inspected>.
-  **Proof:** <red test/repro/reason unprovable>. **Fix:** <concrete fix>.
+  **Proof:** <red test/repro/reason unprovable; actual execution status>.
+  **Fix:** <provisional correction, any unresolved product choice>.
+  **Gate:** <why the consequence blocks or permits this release>.
 
 ### 🛡️ Latent hazards — guarded upstream, no priority
 
@@ -320,6 +314,10 @@ test gaps or risks. Group by `### 🔥 P0 — Critical`, `### 🔴 P1 — High`,
   **Local enforcement:** <assertion or guard-pinning test>.
 
 ### 🧪 Testing gaps
+### Closure evidence
+<when requested: finding ID, candidate, actual repro/check result, independently
+checked entry points and neighboring behavior, maintenance assessment, verdict>
+### Optional maintenance proposals
 ### ⚠️ Residual risks
 
 > **Verdict:** ✅ Ready to merge | 🟡 Ready with fixes | ⛔ Not ready
@@ -334,7 +332,8 @@ Rules:
   author can parse is not. Everything past that — mechanism, call chain,
   identifiers, the counterexample you ruled out — goes in the keyed bullet, with
   bold labels in this order: **Impact**, **Invariant**, **Checked**, **Proof**,
-  **Fix**.
+  **Fix**, **Gate**. Include a concrete future-change example in **Impact**
+  for maintainability findings.
 - **There is no `File` column.** Locations live in the Issue cell (see `sites`).
   Keep the remaining columns to the ones that are short by nature — `#`, `Gate`,
   `S/F → P`, `Blast radius`, `Reviewer`, `Confidence` — so the Issue cell gets
@@ -342,8 +341,9 @@ Rules:
   they add nothing.
 - A root-cause cluster is one numbered finding: the lead site first in the cell's
   location line, the other symptom sites after it (up to three) with the full
-  list and the reasoning in the **Invariant** bullet, severity/frequency taken
-  from the worst symptom.
+  list and the reasoning in the **Invariant** bullet. Rank from the highest-risk
+  demonstrated symptom's complete S/F pair; never combine the severity of one
+  symptom with the frequency of another to manufacture a worse rating.
 - Never strip the triple: every finding carries `S<n>/F<n> → P<n>` in the
   table, the CR record, and any prose or handoff that names it. Sections
   group by the computed P.
@@ -353,8 +353,9 @@ Rules:
   orchestrator assigns their durable CR IDs.
 - Exact file and line for every code finding, inside the Issue cell. No time
   estimates.
-- Do not apply fixes unless explicitly asked. If asked to fix a P0 or
-  confidence-100 P1, write the red failing test first, then make it green.
+- Do not apply fixes during review. If fixes were also requested, hand the
+  completed report and existing authorization to `infi-fix-planning` for its
+  bounded round. The loop orchestrator owns that handoff in loop mode.
 - Standalone runs: after writing the CR file, summarize for the requester —
   verdict and counts in the terms their project instructions ask for (product
   terms if the audience is non-technical), and link the CR file as the primary

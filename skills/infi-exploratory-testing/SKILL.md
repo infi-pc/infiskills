@@ -233,14 +233,15 @@ Read every `reviews/<lens>.md` and produce `report.md` per
 3. **Cross-check the previous run** (`report.md` linked from `references/runs.md`).
    Anything already known is tagged "previously known — still present" and
    excluded from the *new* count. Never re-file a known issue as new.
-4. **Rank with the shared risk matrix** (defined in the `infi-code-review`
-   skill): assign severity `S0–S3` and frequency `F0–F3` independently, compute
+4. **Rank with the [shared review contract](../infi-code-review/references/review-contract.md):**
+   assign severity `S0–S3` and frequency `F0–F3` independently, compute
    priority `P0–P3` from the matrix, and keep the full `S<n>/F<n> → P<n>` triple
-   on every finding in every artifact — never a bare P. When lenses disagree,
-   multi-lens agreement and `confirmed-by-re-drive` pull severity up;
-   `suspected` pulls it down. Frequency comes from how often a real user's
-   session crosses the path, and walker evidence is the best frequency source we
-   have — say what had to happen in the walk to trigger it.
+   on every finding in every artifact. Agreement and re-drive affect confidence,
+   not the severity of the consequence. Name the triggering workflow, recovery,
+   guarantee and its basis, and reach evidence; a deterministic walker repro
+   does not establish population prevalence. Give an explicit merge-gate reason.
+   Use the shared disposition and closure rules for follow-up evidence; retain
+   a source ET report as a snapshot when a FIXES ledger owns current status.
 5. **Estimate complexity S/M/L** — you may read code (read-only) to judge this;
    label it an estimate.
 6. **Walker blockers** enter the same pipeline as findings.

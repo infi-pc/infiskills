@@ -2,46 +2,16 @@
 
 ## Ranking: severity × frequency → priority
 
-Use the same matrix as the `infi-code-review` skill, so exploratory and code
-findings are directly comparable and can be triaged in one list.
+Read the [shared review contract](../../infi-code-review/references/review-contract.md)
+for the single severity/frequency matrix, evidence fields, merge gates, and
+closure rules. Keep `S<n>/F<n> → P<n>` on each finding and handoff so exploratory
+and code findings can be triaged together.
 
-**Severity (S)** — how bad one hit is. Calibrate the top of the scale to what
-*this* product is trusted for: whatever the user would call unacceptable loss.
-
-- **S0** — user data lost, corrupted, or silently overwritten; the core
-  create/save/open path unusable; credentials or another user's data exposed;
-  money moved wrongly.
-- **S1** — a core flow fails, or *lies* such that the user cannot trust the
-  result without a workaround; the app makes a wrong claim about saved or synced
-  state; an accessibility issue blocks a core flow.
-- **S2** — real friction: contradictory messages, confusing states, missing
-  recovery actions, accessibility failures off the core path, visual defects on a
-  primary screen.
-- **S3** — polish: minor visual inconsistency, wording, cosmetics in rare states.
-
-**Frequency (F)** — how often a real user's session crosses the failure path.
-Walker evidence is the best frequency source available: say what had to happen in
-the walk to trigger it.
-
-- **F0** every-use · **F1** common · **F2** occasional (specific but realistic
-  conditions) · **F3** rare (unusual timing, narrow race, exotic state).
-
-**Priority (P)** — computed, never assigned by feel:
-
-|        | F0 | F1 | F2 | F3 |
-| ------ | -- | -- | -- | -- |
-| **S0** | P0 | P0 | P0 | P0 |
-| **S1** | P0 | P1 | P1 | P2 |
-| **S2** | P1 | P2 | P2 | P3 |
-| **S3** | P2 | P3 | P3 | P3 |
-
-Keep the full `S<n>/F<n> → P<n>` triple on every finding in every artifact. A
-bare `P1` hides whether it is a rare catastrophe or a constant paper cut, and
-that difference decides the fix. The scale is capped at P3 on purpose — do not
-invent P4+; open-ended scales drift between runs and break cross-run comparison.
-
-When lenses disagree, multi-lens agreement and `confirmed-by-re-drive` pull
-severity up; `suspected` pulls it down.
+Walker evidence establishes the trigger and observed consequence. It does not
+establish how many users encounter that workflow. Name the affected population,
+recovery, and any assumptions; leave unknown prevalence unknown. Reviewer
+agreement or a successful re-drive increases confidence in the claim without
+changing the severity of its consequence.
 
 ## Complexity (S/M/L, estimates)
 
@@ -72,9 +42,14 @@ New this run: N x P0, N x P1, N x P2, N x P3. Previously known, still present: N
 | F1 | ... | S1/F1 → P1 | M | functional, ux-flow | new |
 
 ### F1: <title>
-- **What the user experiences:** <plain language, no code>.
+- **What the user experiences:** <plain language, recovery, affected workflow
+  and reach evidence; distinguish assumptions>.
+- **Guarantee:** <invariant and its basis in a supported workflow>.
 - **Repro (user steps):** 1. ... 2. ... 3. ...
 - **Evidence:** <links to shots / ax / scenario.md>.
+- **Confidence:** <confirmed-by-re-drive / observed-in-evidence / suspected;
+  remaining uncertainty>.
+- **Merge gate:** <blocks / conditional / non_blocking; release-based reason>.
 - **Suggested direction:** <product-level, not a diff>.
 - **Complexity:** S/M/L (estimate) — <one-line why>.
 
@@ -96,6 +71,9 @@ structure it as question / options / recommendation.
 
 ## Durable findings archive
 
+This section applies to standalone runs. In loop mode, write only the assigned
+untracked artifact; the loop orchestrator owns durable records and status.
+
 After writing the run-local `report.md`, write the same complete report to the
 allocated `findings/ET<N>.md`.
 
@@ -106,5 +84,7 @@ allocated `findings/ET<N>.md`.
 - Prefix finding IDs with the archive ID when useful (`ET3-F1`, `ET3-F2`, ...)
   so they remain unambiguous outside the run directory.
 - Rewrite relative evidence links so they resolve from the findings directory.
-- A follow-up to the same exploratory run updates its existing ET file.
+- A follow-up appends revision-specific evidence to its existing ET file while
+  preserving earlier observations. Link an existing FIXES ledger for current
+  status instead of maintaining a second mutable status table.
 - A clean run still gets an ET file with zero counts, walked coverage, and gaps.

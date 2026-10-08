@@ -1,572 +1,353 @@
 ---
 name: infi-review-loop
-description: Iteratively polish a scope-settled feature branch or PR until it converges — alternating rounds of capacity-scheduled review tracks (code-review subagents, exploratory testing, static analysis, soft code-quality/architecture review, docs/marketing-copy drift) with fix rounds in between, repeating until reviews come back clean or hit agreed stopping bars. Use whenever asked to "run the review loop", "polish this PR until clean", "review and fix until done", "iterate on this feature until it converges", "harden this branch", or to take a finished-scope feature through repeated review-fix cycles.
+description: Coordinate independent reviews and proportional fix rounds for a scope-settled branch or PR. Own release guarantees, authorization, finding status, and stopping rules while composing infi-code-review, infi-fix-planning, and relevant testing tracks. Use for review-and-fix loops, hardening a branch, or polishing a PR until its agreed release guarantees are verified.
 ---
 
 # Review loop
 
-You are the **loop orchestrator**. The input is a feature whose scope is
-settled (a PR or branch); the output is the same feature, unchanged in scope,
-improved in everything else — correctness, robustness, UX, static cleanliness,
-and code quality. You get there by looping: run review tracks, fix what they
-find, run them again, until the bars are met.
-
-Three levels of agents: **you** (plan rounds, hold the scope contract, judge
-convergence, talk to the user) → **track and fixer subagents** (one per review
-track or fix batch per round) → **workers** the track subagents spawn
-themselves (focus reviewers, walkers, reviewer panels). You never review or
-fix inline — context is your scarcest resource and the loop needs all of it.
-
-The skill is project-agnostic: every command, path, and convention it needs is
-discovered in Phase 0 and written into the contract, not hardcoded here.
-
-## Context budget
-
-The loop dies when any level fills its context with another level's work, so
-each level holds only what its decisions need:
-
-- **You (level 1)** hold the contract, the ledger, findings *summaries*,
-  verify verdicts, and command output. Never file contents or full diffs —
-  when you need a fact about the code (line counts, trigger checks, "is this
-  export referenced?"), get it from `git diff --stat`, `wc -l`, grep counts,
-  or a throwaway read-only exploration subagent, not by reading the file. If
-  you catch yourself reading source to "double-check" a finding, you are doing
-  level-2 work and paying for it with round-planning capacity.
-- **Track and fixer subagents (level 2)** hold one track or one fix batch:
-  the contract, their slice of the diff, and the findings assigned to them.
-  Never the whole run — a fixer does not need other tracks' reports.
-- **Workers (level 3)** hold one focus, one scenario, or one file cluster.
-  The track subagent that spawned them owns the merge.
-
-Summaries flow up, never raw material: subagents write full detail to their
-`<run-dir>` files and return only counts, verdicts, and finding titles. If you
-need more than a returned summary, read the round file — it is written to be
-skimmed — not the sources behind it.
-
-## Capacity and worker discipline
-
-The fan-out design assumes slots exist. When it does not check, the classic
-failure is this: "parallel" tracks serialize behind idle track orchestrators
-that consume the budget while doing no work, one runaway reviewer blocks every
-walker, and a finished worker thread gets reused for a supposedly blind lens.
-Plan for the capacity you have, not the one the skill imagines:
-
-- **Probe first.** Establish the real concurrent-subagent budget in Phase 0
-  and record it in the contract; it is as binding as the scope.
-- **Parallel-track mode.** Use it only when the confirmed capacity can hold
-  every selected track orchestrator plus the workers in each track's handed
-  plan at the same time. Run those tracks in parallel.
-- **Constrained mode.** When slots cannot hold the track orchestrators *plus*
-  their planned workers, run the tracks sequentially and give the active track
-  the full worker budget available beneath its orchestrator. Parallelism is a
-  means; starving every track's workers to keep two coordinators alive inverts
-  the point.
-- **Independence beats concurrency.** Merge review lenses into fewer *fresh*
-  reviewers before ever reusing a finished thread — a reviewer resumed on a
-  used context is not blind. Reviewers are never spawned as children of fixer
-  threads.
-- **Milestones, not pleading.** Every worker prompt carries a milestone
-  contract: artifact skeleton first, first product action or finding by a
-  named checkpoint, partial artifact updated as it goes. A worker that misses
-  a milestone gets one reminder, then is interrupted. An interrupted worker
-  with a valid partial artifact is a *result* — a documented coverage gap;
-  three finalization requests to the same worker is the process failure.
-  Never let one overrunning worker block the round.
-- **Degrade around stale slots.** After interrupting a worker, probe capacity
-  again. If the platform still counts that context as active, treat the slot as
-  unavailable: shrink the handed budget, continue sequentially where the
-  remaining independence contract is executable, or record a setup coverage
-  gap and stop that track. Never reuse the stale context as a fresh reviewer or
-  wait indefinitely for repository code to reap a platform-owned thread; record
-  the event in `META` for later troubleshooting.
-
-## What a run produces
-
-- `<run-root>/review-loop/<date>-<slug>/loop.md` — the scope contract, the round
-  ledger, and per-round outcomes. The single source of truth for the run.
-  `<run-root>` is the project's gitignored scratch directory (`.context/` if the
-  project uses one, otherwise `.review-loop/`, added to `.gitignore`).
-- Durable tracked findings: the loop orchestrator owns one `findings/CR<N>.md`
-  and, when exploratory testing is selected, one `findings/ET<N>.md` for the
-  whole run. Review tracks write only their disjoint untracked ROUND artifacts;
-  after all selected review tracks finish, the loop orchestrator updates the same
-  durable files in a separate records step. Never one file per round.
-- Each successful fix step has a verified fix commit, followed by a
-  records-only provenance commit that backfills that fix commit's hash into
-  the CR/ET records. This avoids a commit needing to contain its own hash while
-  keeping every round diffable and attributable.
-- A final summary for the requester in product terms.
-
-## Phase 0 — Scope contract (always stops for confirmation)
-
-Never start reviewing before the user confirms the contract. The whole loop is
-only safe to run autonomously because the contract fences it in; an unconfirmed
-contract means autonomous scope drift.
-
-1. **Calibrate the project.** Establish and record:
-   - the default branch (`git symbolic-ref refs/remotes/origin/HEAD`, else `main`);
-   - the project instruction files (`CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`,
-     package-level guides) and any communication-style rules they impose on the
-     final report;
-   - the **static gates** — the project's own typecheck/lint/test/format
-     commands, read from `package.json` scripts, `Makefile`, `justfile`,
-     `pyproject.toml`, `Cargo.toml`, `go.mod`, or the CI workflow. Prefer the
-     exact commands CI runs; if CI is the only source of truth, name the
-     workflow file;
-   - the **non-static test tiers** — integration, end-to-end, visual, packaged,
-     or manual suites, and the rule for when each is required (usually stated in
-     the project's testing guide);
-   - the findings directory (default `findings/`) and the run root.
-2. Identify the diff (branch vs the default branch unless told otherwise) and
-   read the PR body, plan docs, and recent commits.
-3. Write the contract into `loop.md` and present it in the project's preferred
-   communication style — defaulting to decision-first: the question, labelled
-   options with their impact, a recommendation, then next steps.
-   - **Scope** — what the feature is, in product terms; the boundary fixes may
-     not cross (no new features, no behavior outside the diff's intent).
-   - **Fixed decisions** — design/UX choices and architectural aspects that are
-     settled and must not be relitigated by any reviewer or fixer.
-   - **Cleanup** — whether ROUND-0 cleanup will run, and which files trigger it
-     (see below).
-   - **Tracks** — which review tracks this run uses and why (see table).
-   - **Capacity** — the probed concurrent-subagent budget and the resulting
-     scheduling mode (parallel tracks vs constrained sequential mode). Record
-     each selected track's planned worker allocation so the mode is auditable.
-   - **Autonomy** — proposed level (below), user picks.
-   - **Stopping bars and round budget** — the defaults below, including the
-     five-round correctness budget plus the two-round Stage-B finishing
-     reserve; the user may tighten or loosen them.
-   - **Verification plan** — the full static suite plus every non-static test
-     tier prescribed by the changed surfaces' project guides. Name the exact
-     commands discovered in step 1, and the rule that decides when each
-     non-static tier is required.
-   - **Commit policy** — a verified fix commit plus its records-only provenance
-     commit for each successful fix round; confirm.
-4. Get explicit confirmation — of the whole contract, not a slice of it.
-   Present every section as a labelled decision with a stated default, and
-   say plainly that a reply confirms the defaults it does not override. Never
-   fold stopping bars, the verification plan, or commit policy into prose the
-   user can miss: a terse "A1, B1" reply must not be read as agreement to
-   sections that were never presented.
-5. **Allocate the run's durable records once, immediately after confirmation.**
-   Scan the findings directory for `CR*.md` and allocate one greater than the
-   highest CR suffix; do the same independently for `ET*.md` when the exploratory
-   track is selected. Create each allocated path with the date, exact
-   scope/base/head when known, and a `Pending ROUND-1` status, then record the
-   paths in `loop.md`. Review tracks receive their untracked ROUND artifact paths
-   and the existing durable finding inventory needed to recognize follow-ups;
-   they never allocate or edit CR/ET files. The loop orchestrator updates the
-   allocated records after the review step.
-6. Run the confirmed verification plan once as the pre-review baseline and
-   record each command and result in `loop.md`, then start ROUND-0 when
-   triggered or ROUND-1 otherwise. A red baseline is review evidence, not
-   permission to narrow the confirmed plan.
-
-Autonomy levels (propose `checkpoint` unless asked otherwise):
-
-- **checkpoint** — stop after every round's reviews; user approves the fix
-  plan before anything is changed.
-- **guided** — fix P0–P2 mechanical findings autonomously; stop only for
-  taste/judgement calls (quality-track proposals, ambiguous product behavior).
-- **autonomous** — run to convergence or the applicable stage/total cap without
-  stopping; taste proposals are logged as follow-ups, never auto-applied.
-
-## ROUND-0 — Cleanup (conditional, before any review)
-
-Reviewers and fixers degrade sharply on oversized, cluttered code: a focus
-reviewer cannot hold a 1000-line function precisely, and dead code produces
-false findings that waste a fix round. So when the diff is messy, clean it
-*before* the first review — every later round gets cheaper and sharper.
-
-**Trigger** — run ROUND-0 only if the diff contains at least one of: a changed
-function > ~150 lines, a changed file > ~500 lines, or obviously dead code
-(unused exports, unreachable branches, commented-out blocks, leftover debug
-scaffolding). Detect triggers cheaply — `git diff --stat`, `wc -l`, a grep for
-commented-out blocks — without reading file contents into your own context.
-Otherwise skip ROUND-0 and note the skip in the ledger.
-
-**Who runs it** — subagents, like every other mutation in the loop. Spawn one
-cleanup fixer per oversized file (or per small cluster of entangled files);
-fixers over disjoint files run in parallel. Each fixer's context is only the
-scope contract, its target file(s), and the mechanical rules below — that
-narrowness is the point: a fixer holding one 900-line file splits it well, a
-fixer holding the whole diff splits it sloppily. You only dispatch, verify,
-and commit.
-
-**Strictly mechanical, behavior-preserving moves only:**
-
-- Split oversized functions into named steps; split oversized files along
-  existing seams. Pure extraction — no signature redesign, no new
-  abstractions, no renames beyond naming the extracted pieces.
-- Delete provably dead code (verify with a search for references, not a
-  guess); anything only *probably* dead is a finding for later rounds.
-- Nothing that changes behavior, public APIs, or persisted data. Judgement
-  refactors (re-abstracting, coupling changes, renames of existing things)
-  belong to the stage-B `quality` track, not here.
-
-Success is measured on the **largest remaining review unit across every file
-the cleanup touched**, not on the named file: relocating an oversized
-implementation intact behind a thin entry file is a rename, not a split — a
-façade passes verification and then gets thrown away at review. Put this
-acceptance rule in the fixer prompt so façades are never built at all. And "no
-legal move" is itself a legal outcome: when no behavior-preserving split can
-meet the bar, record *trigger fired, no safe mechanical move* in the ledger and
-route the file to the quality track or architect step instead of forcing it.
-
-**Safety** — cleanup happens before any correctness baseline exists, so it
-must be provably inert: run `ROUND-0:verify` (full static suite) and commit
-separately as `review-loop ROUND-0: cleanup`. If the code being split has thin
-test coverage, extract more conservatively — smaller steps, one file per fixer
-commit-checkpoint. Attribute any red verify against the Phase-0 baseline
-before acting on it: a failure that already reproduces at the baseline is
-pre-existing — file it as a finding and keep the cleanup, rather than throwing
-away a good extraction over a pre-existing gate failure. A red the cleanup
-*introduced* is reverted, not repaired: cleanup is optional by definition, and
-debugging it burns the round budget the loop exists to protect.
-
-The separate commit keeps the story honest: reviewers still review the full
-branch diff, but any bug introduced here is attributable to ROUND-0 by diff,
-not smeared into the feature.
-
-## Review tracks
-
-| Track | What it is | Cost | How to run |
-| --- | --- | --- | --- |
-| `static` | The project's own gates from Phase 0 (typecheck, lint, unit tests, format, project-specific checks) plus advisory zero-config dead-code/lint probes | cheap | inline or one subagent |
-| `code-review` | Multi-reviewer defect hunt | medium | subagent follows the `infi-code-review` skill in loop mode |
-| `exploratory` | Live-app walkers + reviewer panel driving the real app | heavy | subagent follows the `infi-exploratory-testing` skill |
-| `quality` | Soft code-quality: oversized functions/files, naming, abstraction level, coupling, architecture within the feature | medium | a code-simplification skill if the project has one, else one reviewer subagent with the bars below |
-| `docs` | Text-vs-code drift: do docs, READMEs, marketing copy, and in-app text still tell the truth about the changed behavior? | cheap | one read-only reviewer subagent |
-
-Track notes:
-
-- **static**: run exactly the commands in the confirmed verification plan.
-  Zero-config probes the project has not adopted (a dead-export finder, an
-  unconfigured linter) are *advisory* — fix only clear wins (dead exports, real
-  bugs), never churn style, and never add linter configuration unless the
-  contract includes it.
-- **code-review**: pass the scope contract verbatim, immutable round scope,
-  existing CR finding inventory, and assigned untracked artifact path. The CR
-  number is context for stable follow-ups, not permission to edit the record.
-  The inventory includes recorded latent hazards: every pass re-checks them
-  against the round's delta — a new caller or entry point that bypasses a
-  hazard's guard converts it to a live finding at its `S-if-unguarded`. That
-  re-check is the early warning that catches a new entry point turning a
-  guarded assumption into a reopened P0.
-- **exploratory**: only when the diff touches a user-facing surface the project's
-  exploratory adapter can drive. The track subagent owns the app server for its
-  pass; never run two app-driving tracks at once, and scope its scenarios to the
-  feature. If the project has no adapter yet, either budget a round for writing
-  one or record the track as unavailable in the contract.
-- **quality**: hard bars are objective (changed file > 500 lines, new function
-  > 80 lines, obvious dead code) — normally already handled by ROUND-0, so
-  here they catch what slipped through or regressed. The track's real job is
-  judgement: renames, abstracting or de-abstracting, coupling changes. Those
-  are **taste**: always presented as proposals with trade-offs for the user to
-  accept, in every autonomy mode.
-- **docs**: the reviewer starts from the *behavior the diff changed* and hunts
-  every text surface that describes it: `docs/`, package and app READMEs and
-  guides (testing, release, contributing), the marketing or landing site if the
-  repo contains one, in-app copy and translation catalogs (a string changed in
-  one locale is drift in the others), code comments, and skill or prompt files
-  that state the old behavior. Two finding classes: **factual drift** (text says
-  X, code now does Y) is mechanical → fix it; **voice** (tone, positioning,
-  marketing wording) is taste → proposal only. Repo edits only — never deploy
-  any surface; releases have their own procedures.
-
-## Round anatomy
-
-Label everything: the round is `ROUND-<N>`, its substeps
-`ROUND-<N>:code-review`, `ROUND-<N>:exploratory`, `ROUND-<N>:static`,
-`ROUND-<N>:quality`, `ROUND-<N>:records`, then `ROUND-<N>:fix` and
-`ROUND-<N>:verify`, plus `ROUND-<N>:architect` when escalation triggers. Use
-these labels in `loop.md`, in subagent prompts, in commit messages, and in every
-user-facing update, so a human can replay the run from the ledger.
-
-**1. Plan** — pick this round's tracks (policy below), record them in the
-ledger with a one-line reason each. Then refresh the review candidate: capture
-`git rev-parse HEAD` as this round's immutable `round input head`, derive the
-exact full candidate range from the confirmed base to that hash, and record
-both in `loop.md`. From ROUND-2 onward also record the previous round input
-head and pass `<previous-round-head>..<round-input-head>` as the focused delta
-that contains the intervening fix and provenance commits. The product scope
-contract remains fixed, but its Phase-0 head is never reused as a later round's
-candidate. Do not mutate tracked files between this capture and completion of
-the review step. If HEAD changes anyway, discard those review artifacts, retain
-the superseded scope identifier in the ledger, and start a new review attempt
-with a newly captured immutable hash.
-
-**2. Review** — dispatch the selected track subagents according to the
-confirmed Phase-0 scheduling mode. In **parallel-track mode**, spawn all
-selected tracks in parallel only because capacity can hold their orchestrators
-plus every worker allocation in their handed plans. In **constrained mode**,
-run tracks sequentially and hand the active track the full worker budget
-available beneath its orchestrator; stop it before starting the next track.
-Under either mode tracks are repository-read-only: no source, test,
-configuration, or tracked findings edits. Each track may write only its
-assigned disjoint artifact under `<run-dir>/ROUND-<N>/`. Every prompt includes
-the scope contract verbatim, round label, immutable round input head, exact
-full candidate range, the previous-round focused delta when one exists, any
-existing stable finding inventory relevant to the track, its artifact path,
-and its handed worker capacity.
-
-**3. Records (`ROUND-<N>:records`)** — only after every selected review track
-has stopped, read the untracked ROUND artifacts and update the run's
-preallocated CR/ET files. The loop orchestrator alone performs this tracked
-mutation: merge new evidence, preserve stable IDs and earlier round history,
-append newly accepted findings after the record's highest suffix, and record
-the exact immutable round scope. Track-local candidate IDs are not durable
-until this step maps them into the CR/ET record. This records step is separate
-from review and completes before triage or any fixer starts.
-
-**4. Triage** — merge findings across tracks, then **cluster by root cause**:
-findings violating the same invariant are one cluster, whichever track or
-round surfaced them (the code-review track names each finding's `invariant` —
-use it as the clustering key, and cluster exploratory/static findings the same
-way). Split the result into: *fix now* (in scope, meets the round's bar),
-*taste proposals* (quality judgement calls), *latent hazards* (real in
-isolation, unreachable behind a remote guard — recorded with their
-`S-if-unguarded` and guard location, never counted toward bars; their cheap
-local enforcement — a fail-fast assertion or guard-pinning test — may ride
-along with a fix batch when trivially in scope, otherwise it joins the
-follow-ups), *out of scope* (violates the contract — goes to the follow-ups
-ledger, never fixed silently). Order *fix now* by computed priority (the
-`infi-code-review` severity × frequency matrix); tie-break within a priority by
-severity, then frequency. Every finding keeps its full `S<n>/F<n> → P<n>` triple
-through triage, fixer prompts, records, and reports — the triple is the
-information, the P alone is only the ranking. At `checkpoint`, stop here and
-present the fix plan with clusters shown as single units.
-
-**5. Fix (`ROUND-<N>:fix`)** — spawn fixer subagents for the *fix now* list.
-Fixers get the scope contract verbatim, the specific findings (file:line, why,
-suggested fix, invariant, and the full `S/F → P` triple), and these rules: stay
-inside the contract; for P0/P1 write the red failing test first, then make it
-green; run the tests you touched. Batch related findings per fixer; serialize
-fixers that touch the same files.
-
-Root-cause discipline for fixers:
-
-- **A cluster is one assignment.** Never split symptoms of the same invariant
-  across parallel fixers — the classic failure is two fixers each patching
-  their side of a shared persistence boundary, both passing locally, and the
-  guarantee between them staying broken.
-- **Fix the cause, then sweep.** State the invariant being restored, fix it at
-  the point that makes every symptom impossible, then sweep the remaining
-  paths that touch the same invariant (composed/manual variants of the fixed
-  path, error branches, other callers) for unlisted symptoms.
-- **Report, don't expand.** If restoring the invariant properly needs more
-  than the assigned findings — a structural change, another subsystem, a
-  contract question — stop and report that back instead of patching symptoms
-  to get green. A symptom patch that leaves the invariant broken is the loop's
-  most expensive failure mode: it costs this round *and* a later round's
-  "closure invalidated" discovery.
-
-Parallel-batch discipline:
-
-- **Declare shared contracts before dispatch.** Write down what the batches
-  share: who owns each lifecycle transition, what "persisted" means, which
-  side acknowledges what. A shared contract either merges the batches into
-  one, or names an integration owner who lands *after* them with a test that
-  crosses the boundary. A fixer that discovers mid-fix it changed a
-  cross-package contract reports it immediately so the integration step gets
-  scheduled — otherwise you are inventing an unplanned integration batch late,
-  because three "non-overlapping" batches turned out to share one lifecycle.
-- **Red tests must model production.** A P0/P1 red test reproduces the
-  production lifecycle — the same sequence and timing the real caller
-  performs — not a convenient approximation. A test that manufactures a state
-  production never reaches proves nothing; a fix can stay green for a full
-  round while the bug survives, because the test held a resource longer than
-  production ever does. The testing reviewer checks fix tests against
-  production call paths for exactly this.
-
-**6. Verify and record (`ROUND-<N>:verify`)** — run the full static suite plus
-every command in the confirmed verification plan whose test files or observed
-behavior changed since its last green run. Any user-facing fix re-runs its
-prescribed surface tier, per the rule recorded in the contract. Red → the fix
-round failed; do not commit broken state, spawn a repair fixer, and re-verify.
-
-Flake protocol — for a failing test that neither this round's diff nor its
-tests touched: reproduce it in isolation first. If the isolated run passes,
-rerun the affected suite once; a second full-suite failure blocks regardless
-of isolated passes. Either way, record the test in the ledger's
-flake-candidate list so the next occurrence is a pattern, not a fresh
-investigation. An isolated pass alone never establishes green, and
-pre-existing vs introduced is decided against the Phase-0 baseline.
-
-When verification is green, use this sequence so provenance is possible:
-
-1. In the CR/ET records, mark fixed findings `fixed — pending re-review
-   (ROUND-<N>:fix, commit pending)` and update the ledger.
-2. Commit the fixes, tests, and current record updates as
-   `review-loop ROUND-<N>: <summary>`; capture the resulting hash.
-3. Replace each `commit pending` marker with that exact hash. Commit only the
-   tracked CR/ET provenance changes as
-   `review-loop ROUND-<N>: record evidence`. (`loop.md` remains the gitignored
-   run ledger.) Confirm the provenance commit contains no product or test code.
-
-If a round converges without a fix step, commit changed CR/ET review evidence
-once as `review-loop ROUND-<N>: record clean review`; there is no fixing hash
-to backfill.
-
-A green suite does not close a finding — marking something "resolved" right
-after a fix invites false confidence. Findings move through explicit states in
-the CR/ET records: `open` → `fixed — pending re-review` (fix committed,
-provenance recorded) → `verified closed` (a later review round covered its paths
-and found no new counterexample against its invariant) → or `closure
-invalidated` (a new counterexample on the same invariant — which is also an
-architect-escalation trigger). Convergence counts only `verified closed`; the
-final review round that meets every bar is what verifies the last batch.
-
-**7. Converge or continue** — evaluate stopping rules; either start
-ROUND-<N+1> or write the final report.
-
-## Track selection policy
-
-Correctness first, beauty second: refactoring code that still has P0/P1 bugs
-wastes both rounds, so quality waits until the defect hunt has converged.
-
-- **ROUND-0**: cleanup, only when triggered (see above).
-- **ROUND-1**: `static` + `code-review`, plus `exploratory` if the feature is
-  user-facing and an adapter can drive it.
-- If a fix round itself leaves a file or function over the cleanup bars,
-  prepend a mechanical cleanup step (same rules as ROUND-0) to the next round
-  before its reviews.
-- **ROUND-2+ (stage A)**: `static` every round; re-run `code-review` while it
-  still finds fixable issues; re-run `exploratory` only if the previous fix
-  round changed user-facing behavior.
-- **Stage B** (first round after code-review meets its bar): add `quality`
-  and `docs`. Entering Stage B activates its reserved two-round finishing
-  budget even when Stage A used all five correctness rounds; never spend the
-  last permissible round discovering Stage-B work with no review capacity
-  left to verify its fixes. Both tracks deliberately run late — docs checked
-  against round-1 behavior go stale the moment a fix round changes that
-  behavior, so check text once the behavior has stopped moving. Apply accepted
-  refactors and doc fixes, then run one more `static` + focused `code-review`
-  pass over the refactor diff — refactors are where "fixed" features quietly
-  break.
-- Re-run `docs` only if a later fix round changed user-visible behavior
-  again.
-- Skip any track whose previous pass was clean and whose inputs haven't
-  changed since; note the skip in the ledger.
-
-## Architect escalation (`ROUND-<N>:architect`)
-
-Some findings are not bugs to patch but symptoms of a structure that cannot
-hold its own invariants. Fix rounds cannot converge on those — each round
-patches the newest counterexample and the next review finds another. The
-architect step exists to stop that treadmill by changing altitude instead of
-iterating.
-
-**Triggers** — run it when any of these fire:
-
-- **Closure invalidated**: a cause-level fix for a cluster is followed by a
-  new counterexample against the *same invariant* in a later review round.
-- **Oscillation guard** fires (see stopping rules).
-- **Concentration**: three or more distinct findings across rounds land in
-  the same subsystem or on the same boundary between two components. Latent
-  hazards count toward this — several hazards hanging off one invariant mean
-  no single component can enforce it, which is a structural fact even while
-  nothing is technically broken.
-- **Deferred by cleanup or a fixer** as "requires architecture work".
-
-**What it does:**
-
-1. Spawn one architect subagent — read-only, high effort — with the full
-   finding inventory (CR/ET records, follow-ups ledger), the scope contract,
-   and the trigger. Its job is diagnosis at the design level: name the
-   structural property that keeps producing findings (a boundary with unclear
-   ownership, an invariant no single component can enforce, state split
-   across layers that must agree), then produce two or three structural
-   options with trade-offs — including the honest option of staying with
-   targeted patches — written in product and engineering terms.
-2. **Brainstorm with the user — in every autonomy mode.** This is the one
-   step besides Phase 0 that always talks to the user, because structural
-   options usually touch the contract's fixed decisions and always trade
-   scope against robustness. Run it as a real multi-step discussion: the
-   question, the options with product impact, a recommendation; then iterate
-   on the user's pushback rather than forcing a one-shot choice. The user may
-   also defer the whole matter — that converts the cluster into an accepted
-   residual with its risk stated.
-3. **Record the outcome as a contract amendment** in `loop.md`: the chosen
-   direction, what it un-fixes or re-opens, and the new bar for the affected
-   cluster. The next round's fix step implements the decided direction; the
-   architect never edits code.
-
-The architect is an escalation, not a track: it runs between rounds, at most
-once per trigger, and only when triggered — a loop that architect-reviews
-every round is a design committee, not a review loop.
-
-## Stopping rules
-
-Defaults — confirm or adjust in Phase 0:
-
-- **verification**: zero errors from every static gate and every applicable
-  non-static command in the confirmed verification plan. A command may be
-  skipped in an intermediate round only when neither its test files nor
-  observed behavior changed since its last green run; all commands must be
-  green together at convergence. Advisory linter output never blocks.
-- **code-review**: rounds 1–2 aim for zero `blocks`/`conditional` findings of
-  any severity. From round 3 on, the bar relaxes to **no P0/P1** — chasing
-  every P2/P3 forever is how loops oscillate instead of converging. Remaining
-  P2/P3 go to the final report as accepted residuals.
-- **exploratory**: no new P0/P1 findings within the feature's scope.
-- **quality**: hard bars met; taste proposals resolved by user decision (or
-  logged as follow-ups in `autonomous` mode).
-- **docs**: zero factual drift between the changed behavior and any text
-  surface; voice proposals resolved like quality taste items.
-- **Stage-A cap:** five review rounds for correctness. If code review has not
-  met its bar by the end of the fifth Stage-A round, stop and report before
-  Stage B; quality refactoring cannot safely rescue unconverged correctness.
-- **Stage-B reserve:** once Stage A meets its bar, allow up to two additional
-  rounds for the first `quality` + `docs` pass, its fixes, and one independent
-  focused re-review. The total run is therefore capped at seven rounds, but a
-  run that enters Stage B earlier receives only those two finishing rounds; it
-  does not bank unused Stage-A rounds.
-- Hitting either stage cap is a stop-and-report, not a failure to hide.
-- **Oscillation guard**: if the same finding (same invariant) reappears after
-  being fixed twice, or two rounds in a row fix things a previous round
-  introduced, the loop is churning and more rounds will not help — escalate
-  through the architect step, which puts the structural question to the user
-  instead of spending another round on symptoms.
-
-The loop **ends the moment every selected track's bar is met** in the same
-round. Convergence, an applicable stage cap, and the oscillation guard are the
-only three exits; never trail off mid-round without reporting.
-
-## Final report
-
-Update `loop.md` with the closing ledger, then report to the requester in the
-project's preferred style, leading with the outcome in product terms:
-
-- Verdict: converged / capped / escalated, and what that means for merging.
-- What improved, round by round — counts per track, in one short table.
-- Accepted residuals (the P2/P3s deliberately left) as full `S/F → P`
-  triples, and why they're safe. A residual at `F0` or `F1` needs the user's
-  explicit acceptance recorded, whatever its priority — "we ship this paper
-  cut knowingly" is a product decision, not a triage default.
-- Open latent hazards (guard location + `S-if-unguarded`), so the next
-  feature touching those paths inherits the warning instead of rediscovering
-  it as a P0.
-- Out-of-scope follow-ups the contract fenced off, as a candidate next-PR list.
-- Links: `findings/CR<N>.md`, `findings/ET<N>.md`, and the run dir.
-
-## Hard rules
-
-- No review, no fix before the scope contract is confirmed. No fix outside it,
-  ever — out-of-scope findings are recorded, not applied.
-- Review-track scheduling follows the confirmed mode: parallel-track mode runs
-  tracks in parallel only when capacity holds their orchestrators plus planned
-  workers; constrained mode runs tracks sequentially with the full available
-  worker budget handed to the active track. Fix steps never overlap a review
-  step (a reviewer reading files mid-mutation produces garbage findings).
-- Review tracks are repository-read-only and write only assigned untracked
-  ROUND artifacts. The loop orchestrator is the sole owner of tracked CR/ET
-  updates, performed after all review tracks stop and before triage.
-- Every round captures a new immutable input HEAD and exact full candidate
-  range; later rounds never remain pinned to the Phase-0 head.
-- Exactly one CR file per run and, when exploratory is selected, exactly one
-  ET file per run; update those same files every round.
-- Never commit a red `verify` step.
-- Never put code in a records-only provenance commit.
-- Every round and substep carries its `ROUND-<N>[:track]` label everywhere.
-- The loop improves the feature; it does not grow it.
+Bring the agreed release guarantees to a verified state while keeping future
+changes easy. You own scope, decisions, finding status, and stopping rules.
+Use `infi-code-review` to establish findings and `infi-fix-planning` to compare,
+implement, and verify corrections. Optional testing and quality tracks provide
+additional evidence. Finding counts and shrinking diffs are not success criteria.
+
+Read [the shared review contract](../infi-code-review/references/review-contract.md)
+before calibration. Read the relevant entrypoint when dispatching
+[code review](../infi-code-review/SKILL.md),
+[fix planning](../infi-fix-planning/SKILL.md), or
+[exploratory testing](../infi-exploratory-testing/SKILL.md).
+The shared contract owns risk, dispositions, recurrence, and closure; the fix
+skill owns solution comparison and implementation mechanics. Do not recreate
+those procedures inside the loop.
+
+## Keep coordination and execution separate
+
+The orchestrator holds the release contract, finding summaries, decisions,
+coverage, and command results. Track agents handle reviews and one fix round;
+their workers inspect code, implement plans, or verify closure. Delegate
+substantial inspection, while reading a bounded excerpt yourself when needed
+to judge a handoff. Return full evidence in assigned artifacts and short
+outcomes in messages.
+
+Establish actual concurrent-agent capacity before dispatch:
+
+- Run tracks in parallel only when there is room for their orchestrators and
+  all planned workers. Otherwise run tracks sequentially, giving the active
+  track the available worker budget. Apply the same budget to fix planning.
+- Combine compatible review lenses into fewer fresh reviewers when constrained.
+  Do not resume a completed reviewer as an independent new lens, or spawn a
+  closure verifier inside the fixer thread.
+- Give workers an artifact path and meaningful checkpoints. One reminder for
+  a missed checkpoint, then interrupt and assess partial evidence. An
+  incomplete artifact is a coverage gap; do not let it stall every track.
+- If an interrupted worker still occupies a slot, reduce the available budget.
+  Continue where independent work is possible; otherwise report the capacity
+  gap. Never treat a reused context as a fresh reviewer to hide the shortfall.
+
+Review steps and source mutations never overlap. Plan-only workers are also
+read-only. Fixers with overlapping files or shared lifecycle ownership are
+serialized or assigned an explicit integration owner by fix planning.
+
+## Keep one owner for records
+
+- `<run-root>/review-loop/<date>-<slug>/loop.md` records the release contract,
+  scheduling, decisions, and round outcomes. Use the project's gitignored
+  scratch directory (`.context/` when available), otherwise `.review-loop/`.
+- Allocate one tracked `findings/CR<N>.md` for the run and one `ET<N>.md` when
+  exploratory testing is selected, with numbers above the highest existing
+  suffix. Respect the project's alternative findings directory.
+- You alone own current status in those CR/ET records. `loop.md` links to their
+  finding inventory instead of maintaining another status table. Put static,
+  quality, and docs findings in CR; preserve ET findings in ET and cross-link
+  duplicates instead of creating two live status entries for one issue.
+- Inner skills write only their assigned untracked `ROUND-<n>` artifacts during
+  reviews/planning. Fix execution may edit the authorized implementation files,
+  but never CR/ET/FIXES records, and never commits. Do not create a competing
+  standalone FIXES ledger inside a loop.
+- When continuing previous standalone work, import IDs, decisions, and evidence
+  and link the old ledger to its new owner under the shared contract. Preserve
+  historical reports and dispositions.
+
+## Establish scope and reuse existing authorization
+
+Calibrate from files and commands, then record the following in `loop.md`:
+
+1. **Base and candidate:** explicit user/workspace base, then actual PR base,
+   then repository default. Record exact hashes and relevant uncommitted content
+   as a reproducible snapshot; a HEAD hash alone does not identify dirty work.
+2. **Project rules and gates:** read applicable instructions and discover exact
+   static checks plus required integration, end-to-end, visual, installed-package,
+   or manual checks from project guides and CI. Record which changed surfaces
+   require each tier. Follow project rules for starting services.
+3. **Release guarantees:** supported workflows, observable promises, fixed
+   product/design decisions, known limitations, and the boundary fixes may not
+   cross. Distinguish documented commitments from inferred assumptions. Note
+   user maintenance preferences and unresolved support or trust-policy choices.
+4. **Tracks and capacity:** selected tracks and reasons, worker budgets, and
+   whether any optional cleanup has a demonstrated purpose (see below).
+5. **Authorization:** existing decisions, autonomy policy, and commit policy.
+   Do not reinterpret permission to review as permission to implement, change
+   product behavior, publish, or accept a live defect.
+6. **Verification and stopping:** checks for each release guarantee, residual
+   acceptance policy, coverage limits, and round budget. Defaults are five
+   correctness rounds plus two optional finishing rounds when selected.
+
+Present the scope and any material assumptions in plain language. Reuse the
+user's established scope and authorization; do not request confirmation again
+because a new skill or phase began. Read-only review may proceed while a
+product choice remains open. Ask only for missing decisions before dependent
+implementation, showing concrete alternatives and their consequences. Existing
+explicit instructions take precedence over the defaults below.
+
+Autonomy policies:
+
+- **checkpoint** (default): present the concrete fix sheet after review and
+  obtain decisions not already authorized before implementation.
+- **guided:** implement mechanical plans within the agreed guarantees; present
+  unresolved product/architecture tradeoffs before their dependent work.
+- **autonomous:** implement within the agreed guarantees and accepted tradeoffs.
+  Log new optional judgment proposals as follow-ups. A live blocker needing an
+  unauthorized tradeoff remains unresolved; it cannot be silently deferred or
+  called accepted. Present the concrete decision when needed.
+
+Allocate the run records when the review scope is established. Run the required
+verification plan as a baseline before source mutations, recording exact results.
+A red baseline is evidence and may prevent release readiness; it is not
+permission to narrow the checks or expand the fix scope.
+
+## Use cleanup only when it earns its cost
+
+Skip ROUND-0 by default. A long file/function is a reason to inspect its
+structure, not automatic permission to split it. Optional cleanup belongs in
+the plan when demonstrated dead code or an existing seam makes review or
+ordinary changes materially easier. Explain the benefit and likely regression
+surface; observe existing authorization for that work.
+
+Use fix planning in plan and execute modes for accepted cleanup, just as for
+other changes. Keep it behavior-preserving and separately attributable. Never
+move an oversized implementation behind a facade merely to meet a line limit.
+If no useful safe extraction exists, leave it intact and record any concrete
+maintenance concern. Revert an isolated cleanup that introduces failures when
+safe; do not spend the correctness budget expanding optional cleanup.
+
+## Select evidence tracks
+
+| Track | Purpose | Execution |
+| --- | --- | --- |
+| `static` | Project gates and required automated verification | Exact project commands, inline or one worker |
+| `code-review` | Defects and demonstrated maintenance costs | `infi-code-review` in loop mode |
+| `exploratory` | Real user flows and app behavior | `infi-exploratory-testing` in loop mode when the app can be driven |
+| `quality` | Optional naming, boundary, and simplification proposals | Read-only reviewer; require concrete future-change benefit and tradeoffs |
+| `docs` | Factual drift in descriptions of changed behavior | Read-only reviewer across relevant docs, marketing, in-app text, translations, and comments |
+
+Maintenance is evaluated from the first review and during every fix plan and
+closure. Optional cleanup and naming work can wait. No universal file/function
+length thresholds gate the quality track; enforce actual project standards
+when applicable.
+
+For exploratory testing, establish the app adapter and service ownership. If
+unavailable, record the coverage gap and its consequence for the release
+checks; do not build an adapter outside the authorized scope. Never run two
+app-driving tracks against conflicting service state.
+
+For docs, distinguish factual drift from voice preferences. Correct text that
+misstates the implemented guarantee; changing advertised support to conceal a
+bug is a product choice. Voice proposals follow the authorization policy.
+No track deploys or publishes text externally.
+
+Unconfigured linter/dead-code probes are advisory. Only concrete defects or
+project rules become findings; do not add configuration or churn style to
+satisfy an unsolicited probe.
+
+## Run one round
+
+Label artifacts and outcomes `ROUND-<n>:code-review`, `:static`, `:exploratory`,
+`:quality`, `:docs`, `:records`, `:plan`, `:fix`, and `:verify` as applicable.
+
+### 1. Capture the candidate and coverage
+
+Capture a fresh immutable candidate each round, the exact full range from the
+resolved base, and the delta since the previous reviewed candidate. Never
+reuse the initial head for a later review. Preserve dirty content in a snapshot
+when needed. Do not mutate tracked files during review; if candidate content
+changes, discard affected artifacts, record why, and review the new candidate.
+
+ROUND-1 reviews the requested full scope. Later rounds focus on changed fixes,
+shared boundaries, affected guarantees, and gaps, while retaining the full
+candidate range as context. Broaden review when the changes warrant it. State
+which scope was actually inspected; a focused pass is not a fresh full audit.
+
+### 2. Review without mutating the candidate
+
+Dispatch selected tracks with the release contract, exact candidate and ranges,
+requested coverage, stable finding inventory, original repros for pending
+closures, accepted maintenance constraints, artifact path, and worker budget.
+Reviewers receive scope decisions and evidence, not a fixer's expected verdict.
+Require explicit closure
+assessments for handed pending findings under the shared contract.
+
+Recheck latent hazards when the delta touches their guards or introduces a
+relevant entry point. Promote only a demonstrated reachable failure, with
+fresh impact/reach calibration. Several guarded paths alone do not establish
+that a redesign is needed.
+
+Reuse verification results when their code, tests, configuration, dependencies,
+and relevant environment are unchanged. Run appropriate checks for changed
+inputs and record the tested candidate. Never claim an unexecuted test passed.
+
+### 3. Record evidence and triage through fix planning
+
+After all review tracks stop, merge their artifacts into the run's CR/ET files.
+Deduplicate, preserve stable IDs and earlier evidence, assign durable IDs to
+new findings, and record exact coverage. Apply status changes only when their
+shared-contract evidence is present; silence never closes an entry.
+
+Invoke `infi-fix-planning` with `phase: plan` and:
+
+- release guarantees, limitations, maintenance preferences, and authorization;
+- candidate, input findings including provisional suggestions, and relevant
+  history/dispositions from CR/ET;
+- baseline results, exact verification plan, remaining round budget, worker
+  capacity, and assigned `ROUND-<n>/plan.md` artifact.
+
+The returned sheet clusters, diagnoses recurrence, compares maintenance costs,
+and proposes fixes or dispositions. It must cover every input finding exactly
+once. New suggestions enter triage; their discovery does not expand the release.
+Use shared risk rankings to order discussion, with explicit gate reasons and
+maintenance tradeoffs deciding action. Do not convert priority into an
+automatic fix mandate or infer risk acceptance from silence.
+
+Apply the existing authorization policy to the concrete sheet. Record chosen
+alternatives, residual decisions, and any still-pending product questions.
+Independent authorized plans may proceed without forcing unresolved choices.
+
+### 4. Execute one authorized fix round
+
+Invoke `infi-fix-planning` with `phase: execute`, the chosen plans verbatim,
+original findings, candidate, authorization, baseline, verification plan,
+worker budget, and `ROUND-<n>/fix.md` artifact. Confirm the candidate still
+matches the planned input; changes affecting a plan require revalidation.
+
+The fix skill owns fixer scheduling, production-path red proofs, integration,
+maintenance reassessment, required gates, and fresh closure verifiers. It
+returns tested snapshot, actual maintenance changes, gate results, explicit
+closure verdicts, and unresolved issues. It edits only authorized implementation
+files and never commits or changes durable records. You handle newly
+uncovered scope choices; do not run a second implementation workflow alongside
+it or repeat a gate that already passed on identical inputs.
+
+### 5. Verify the handoff and record provenance
+
+Check that the returned evidence covers each plan and any shared integration
+boundary against the actual final product/test content. Apply the shared
+closure states to CR/ET. A fresh closure verifier can establish closure within
+this round; missing evidence leaves `fixed — pending verification` with the
+specific gap. Later product changes invalidate affected evidence.
+
+A failed required check blocks readiness. Attribute it against the baseline.
+For a suspected unrelated flake, reproduce in isolation, then rerun the affected
+suite once if isolation passes; an isolated pass never establishes suite green.
+Record repeated failures as unresolved. Fix planning owns its bounded repair
+pass; further failed attempts go to diagnosis, not an unbounded retry loop.
+
+When commit authorization exists and verification succeeds:
+
+1. Commit only the verified fixes/tests and current record updates, grouped
+   by separable plan or integration batch under the project's commit policy.
+2. Capture hashes and backfill them into CR/ET in a records-only provenance
+   commit. Verify the product/test content matches the tested snapshot and the
+   provenance commit contains no product or test code.
+
+Without commit authorization, leave a reviewable diff and record the tested
+snapshot. Inner skills never commit. If no fixes were needed, record the review
+and its evidence without inventing a fixing hash. Preserve user/unrelated edits.
+
+### 6. Evaluate the release guarantees
+
+Evaluate the stopping rules against current evidence and authorized residuals.
+Continue only for a concrete unresolved guarantee, required check, affected
+interaction, or selected finishing track. Name what the next pass will establish.
+A new whole-PR review is not required merely to change a status label.
+
+## Schedule finishing work without postponing maintenance
+
+- ROUND-1 runs `static` and `code-review`, plus selected exploratory coverage.
+- Subsequent correctness rounds review fixes and interactions that changed,
+  with required checks. Rerun exploratory coverage when its observed behavior
+  changes; skip unchanged clean inputs with the reason recorded.
+- Once correctness guarantees meet their bar, run selected `quality` and `docs`
+  finishing tracks. Their optional two-round reserve covers proposals/fixes
+  and independent verification. Do not discover new discretionary work on the
+  last round and silently claim its implementation was reviewed.
+- Send accepted refactors and documentation fixes through the same fix skill.
+  Recheck the behavior and guarantees they affect. Rerun docs when a later fix
+  changes described behavior. Optional proposals may remain follow-ups.
+- Maintenance assessment of fixes happens in every round regardless of whether
+  the optional quality track was selected.
+
+## Diagnose repeated failures before escalating
+
+Use the recurrence categories in the shared contract: incomplete correction,
+later regression, changed guarantee, or structural inability to enforce it.
+Two recurrences on one guarantee, or two consecutive fix-caused failure rounds,
+trigger diagnosis before another patch. A finding count, file length, or several
+latent hazards is a prompt to inspect, not proof of architectural failure.
+
+When evidence shows an ownership/representation problem, or a necessary fix
+exceeds settled product decisions, dispatch one read-only architect with the
+causal history and release contract. Ask for credible options with maintenance
+and product consequences, including completing the current design or accepting
+a limitation when compatible with release requirements. Do not force a different
+alternative just because the previous implementation was incomplete.
+
+Present unresolved choices with concrete consequences. Record an authorized
+contract amendment before dependent implementation. If the user defers a live
+blocker, state the effect on release readiness. Keep prior fixes and evidence
+attributable. The architect diagnoses and proposes; fix planning implements.
+
+## Stop when the agreed guarantees are verified
+
+Default release bars, adjusted by explicit user decisions:
+
+- Required project gates and prescribed surface checks have passing evidence
+  applicable to the final candidate. Coverage gaps affecting required guarantees
+  remain blockers; advisory probes do not become requirements.
+- Every required release guarantee has current affirmative evidence. Live
+  blockers and conditional findings are corrected or have specifically
+  authorized residual treatment compatible with the release decision.
+- Implemented fixes have explicit closure evidence, including their maintenance
+  tradeoffs and relevant interactions. New suggestions have dispositions or
+  remain clearly optional follow-ups; discovery alone does not mandate a fix.
+- Selected docs coverage accurately describes the final supported behavior.
+  Optional quality/voice proposals are decided or left as follow-ups under the
+  authorization policy. No generic size threshold must be satisfied.
+
+Keep these bars stable across rounds. Do not automatically relax them to
+"no P0/P1" after several attempts or label lower-priority defects accepted.
+
+Default budget: at most five correctness rounds, then up to two finishing rounds
+if those tracks were selected and correctness met its bar. Stop as soon as the
+selected guarantees and checks are satisfied; unused rounds are not a reason
+for more work. A cap, unavailable verification, or unresolved product decision
+ends with the remaining work and its release consequence stated, not a claim
+of convergence. Renewed work requires appropriate scope/authorization and budget.
+
+## Report the outcome
+
+Lead with what is ready and what remains unresolved. Include:
+
+- Verdict: verified for the stated release guarantees, or incomplete with the
+  specific cap, evidence gap, or unresolved decision and its merge consequence.
+- Changes and dispositions, linked to stable findings and fixing commits or the
+  tested uncommitted snapshot. Preserve S/F → P in finding records and handoffs.
+- Maintenance costs added and removed, particularly any new caller obligations,
+  ownership, states, protocols, or conversions accepted during the run.
+- Actual checks, review coverage, and limits. Distinguish focused verification
+  from full-scope review and proposed tests from executed ones.
+- Residual consequences, authorization, revisit triggers, latent hazards, and
+  optional/out-of-scope follow-ups. Deferred is not synonymous with safe.
+- Links to CR/ET records and the run directory.
+
+No pushes, PR comments, tickets, deployments, or other external writes are
+implied by this workflow. Use existing authorization when those are separately
+requested; otherwise finish with reviewable local work.

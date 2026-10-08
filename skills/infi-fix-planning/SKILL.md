@@ -1,396 +1,287 @@
 ---
 name: infi-fix-planning
-description: Turn a code-review findings report (findings/CR<N>.md from infi-code-review) into root-cause fix plans with human-readable problem/solution summaries, alternatives, net-LOC estimates, and a decision sheet — then, after approval, implement, adversarially verify, and record the fixes in a per-PR findings/FIXES-PR<id>.md ledger. One fix round per invocation; alternates manually with infi-code-review until no P0/P1 remains. Use when asked to fix review findings, plan fixes from a review, run a fix round, apply a CR report, or continue the fix loop on a PR.
+description: Triage review findings and compare durable fixes by user impact, maintenance cost, and verification evidence. Supports plan-only requests and one authorized implementation-and-verification round, standalone or inside infi-review-loop. Use when asked to plan or fix review findings, apply a CR or ET report, or continue a fix round.
 ---
 
 # Fix planning
 
-You are the **fix orchestrator** — the counterpart of `infi-code-review`. That
-skill turns a diff into findings; this one turns findings into fixes without
-the four classic failure modes: symptom patches, fixing one instance of a class
-while its unreported siblings ship, fixes that introduce new bugs, and
-defensive bloat that doubles the code to protect against failures nobody
-demonstrated.
-
-One invocation = one fix round: reconcile → cluster → plan → gate → implement
-→ verify → record. The loop is manual alternation — this skill never runs,
-re-runs, or triggers the review; it ends by printing the next command. It also
-never pushes, opens PRs, comments on PRs, or files tickets.
-
-Input: a findings report following the `infi-code-review` finding contract
-(`findings/CR<N>.md`; `ET<N>.md` files use the same contract and are accepted
-the same way). Output: a fix-plan decision sheet, the approved fixes
-implemented and verified, and an updated per-PR ledger.
-
-**Context budget:** you hold the ledger, finding summaries, plan texts,
-verdicts, and command output — never source files or full diffs. Planners,
-fixers, and verifiers read code; you dispatch, judge, and record. If you catch
-yourself reading source to "double-check" a plan, you are doing a planner's
-job with the orchestrator's context.
-
-## Phase 0 — Calibration (cheap, always)
-
-1. **Default branch** — `git symbolic-ref refs/remotes/origin/HEAD`, else `main`.
-2. **Project instructions** — `CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, etc.
-   Fixers must follow them; the report follows any communication style they set.
-3. **Gates** — the project's own typecheck/lint/test/format commands from
-   `package.json` scripts, `Makefile`, CI workflows. Unlike the review skill,
-   this skill **runs** them: once now as the baseline (so later reds are
-   attributable), and again at verify. Record the exact commands.
-4. **Input report** — an explicitly given path or CR number wins; otherwise the
-   newest `findings/CR*.md` whose recorded scope matches the current branch/PR;
-   otherwise ask. If the CR's recorded head is not the current `HEAD`, note the
-   drift in the round header — planners must confirm each finding's sites still
-   hold before planning against them.
-5. **The ledger file** — resolve the PR id (`gh pr view --json number`) and use
-   `findings/FIXES-PR<id>.md`; with no PR, `findings/FIXES-<branch-slug>.md`.
-   Create it on the first round; append on later ones. The round number is the
-   count of existing `ROUND-` sections plus one.
-6. **Capacity** — probe the concurrent-subagent budget; planners, fixers, and
-   verifiers are scheduled within it, never assumed.
-
-## The ledger — `findings/FIXES-PR<id>.md`
-
-One tracked file per PR, the cross-round memory of the loop. **It is the sole
-owner of finding status.** CR files stay immutable snapshots of what each
-review saw; after a round, append one pointer line to the source CR file
-(`Fix rounds tracked in findings/FIXES-PR<id>.md`) instead of editing its
-findings — two files tracking status is how they drift.
-
-```markdown
-# Fixes — PR <id> (<branch>)
-
-Base: <base> · Created: <date> · Source reviews: CR12, CR13
-Original PR size: +1031/−50 · Cumulative fix rounds: +38/−12
-
-## Findings ledger
-
-| Finding | Headline | S/F → P | Status | Plan | Commit |
-| ------- | -------- | ------- | ------ | ---- | ------ |
-| CR12-1 | Visitor's chosen date silently dropped | S1/F2 → P1 | fixed — pending re-review | FP1-A | abc1234 |
-| CR12-12 | Legend movement shifts the page | S3/F1 → P3 | accepted-risk (user, 2026-09-01: cosmetic, revisit if complaints) | — | — |
-
-## ROUND-1 — <date> · input CR12 @ <head> · gate: waited (mixed)
-### Dashboard
-new 16 · reopened 0 · verified-closed 0 · standing 0 · fix-round net LOC +38/−12
-### Plans
-<the decision sheet exactly as presented>
-### Decisions
-<the user's reply verbatim, or "auto-approved: all-mechanical">
-### Outcomes
-| Plan | Alt | Est. net LOC | Actual | Verifier | Commit |
-### Verification
-<each gate command and result>
-```
-
-Statuses a finding moves through — it never disappears, it changes status:
-`open` → `planned (FP<n>)` → `fixed — pending re-review (commit)` →
-`verified-closed (ROUND-<r>)`, or `reopened (ROUND-<r>)`; or a disposition:
-`accepted-risk (who, when, why)`, `deferred (who, when)`,
-`rejected (counterexample)`, `out-of-scope`. When a fix is reverted or fails
-closure, the finding returns to `open` with the failed alternative recorded
-(`failed: FP1-A`) so no later round retries it.
-
-CR ids differ between review runs, so reconcile matches findings across rounds
-by **invariant + sites**, not by id; the ledger keeps the first id as the
-stable name and lists later ids as aliases.
-
-## Round pipeline
-
-### 1. Reconcile (round ≥ 2)
-
-Reviewers are blind by design — they re-report everything. You dedupe against
-the ledger, never by feeding the ledger into a review. Classify every finding
-in the input CR:
-
-- **new** — no ledger match; enters the ledger as `open`.
-- **known-open** — matches an `open`/`planned` entry; alias the id.
-- **standing** — matches an accepted-risk/deferred/rejected entry: list it in
-  one line under the dashboard, do not re-litigate. Re-open it only if the new
-  finding's S/F is materially worse than what was accepted.
-- **reopened** — matches a `fixed — pending re-review` or `verified-closed`
-  entry: the fix failed. Alarm — see *Convergence and alarms*.
-
-Then close the loop on past work: every `fixed — pending re-review` entry
-whose paths the new review covered without a counterexample flips to
-`verified-closed (ROUND-<r>)`. A green suite never closes a finding; a blind
-re-review finding nothing does.
-
-If the input CR has **zero new or reopened P0/P1 and every ledger entry is
-verified-closed or dispositioned, the loop has converged**: this round is
-records-only — update statuses, write the final residual summary, and stop.
-
-### 2. Cluster
-
-Cluster by the findings' `invariant` field — symptoms of one broken guarantee
-are one plan, whatever files they sit in. A coverage/testing-gap finding that
-exists because sibling bugs shipped untested joins the cluster of those bugs
-as its **proof obligation**, not a separate plan. A new finding on an
-invariant with ledger history joins that history.
-
-The CR's `Fix:` hints are **inputs, not plans.** They were written at review
-time without deep surrounding context, and review-time hints are the main
-source of hotfix-shaped fixes. Planners re-derive the fix after reading code.
-
-### 3. Plan (planner subagents)
-
-One read-only planner per cluster (batch small clusters under one planner
-when capacity is tight). Each gets: the cluster's findings with full detail
-(Impact/Invariant/Checked/Proof bullets included — they are repro material),
-the relevant diff slice, the Phase-0 facts, the plan contract, the fix
-taxonomy, and the sweep mandate. Planners return plan text only; no edits.
-
-**Class sweep — mandatory, before writing alternatives.** Name the cluster's
-defect class abstractly ("a predicate treats absent data as a negative
-answer", "sort before slice", "absence-only assertions") and sweep the diff
-for unreported instances of it. In-diff instances join the plan as additional
-sites. Pre-existing instances are recorded in the plan as out-of-scope notes —
-**listed, never fixed**; repo-wide repair of an old class is a follow-up PR,
-not bloat for this one.
-
-### 4. The fix-plan contract
-
-Each plan `FP<n>` states:
-
-- **covers** — the finding ids (≥ 1), each with its `S/F → P` triple. Coverage
-  is checked mechanically before the sheet goes out: **every finding in the
-  input CR appears in exactly one plan or one disposition proposal.** No
-  silent drops — a finding you don't intend to fix gets a disposition
-  proposal, not an omission.
-- **problem** — an effect-first headline plus one or two plain sentences: what
-  goes wrong, when, and what a developer or user observes. Use the same
-  audience contract as `infi-code-review`: the reader knows what the PR is for
-  but has not opened these files. Keep mechanism and identifiers out until the
-  effect is clear.
-- **default solution** — one or two plain sentences immediately after the
-  problem: what changes and why that prevents the failure. The problem/default
-  pair must make sense without the planning detail.
-- **invariant restored** — one sentence. The plan's unit is an invariant,
-  never a line.
-- **alternatives** (1–3), each with: the approach in a few plain sentences
-  (name the design change, not the diff); **net LOC** (added − removed) and
-  touched LOC as honest ranges; regression surface (what could break); the
-  residual risk left standing; test cost. Net LOC is the bloat currency — it
-  is how alternatives are compared and how over-hardening is priced.
-- **red proof** — the test that fails before the fix and passes after.
-  Required for every P0/P1; it must model the production call path, not a
-  convenient approximation. For coverage findings, the tests *are* the
-  deliverable.
-- **do-not** — the tempting hotfix, named explicitly (e.g. "do not add
-  `.max(50)` to the schema while the sort-before-slice remains").
-- **recommendation + decision class** — `mechanical` or `taste`, with the
-  recommended alternative as the stated default.
-- **dependencies** — other plans that must land first, and file overlap.
-
-Alternatives inside one `FP<n>` normally cover the **same findings**: they are
-competing ways to restore the same invariant. Do not invent an option to fill
-a slot; one credible solution is enough. If a structural solution would
-absorb, split, or regroup findings from multiple plans, render it separately
-as an optional **portfolio option** `PO<n>` after the individual plans. State
-which plans it replaces, the union of findings it covers, its combined
-problem/solution summary, total net/touched LOC, proof, regression surface,
-and why the regrouping is structurally better. Validate every selectable
-portfolio independently: each input finding must still appear exactly once.
-Never hide different coverage behind an ordinary `FP1-A/B` choice.
-
-Instead of a fix, a plan may be a **disposition proposal**: accept-risk,
-defer, reject (with the counterexample that disproves the finding), or
-out-of-scope. Disposition proposals are always `taste`.
-
-**Mechanical** means *all* of: the disposition is "fix"; exactly one credible
-alternative exists (others listed only as ruled out); no product-visible
-behavior choice; bounded at roughly ≤ 30 net LOC; and the correct behavior is
-already pinned by a test, spec, or the finding's proof. Doc drift, baseline
-regeneration, dead-comment removal, a predicate correction whose right answer
-an existing test states. Everything else is `taste`.
-
-Latent hazards from the CR never require action and never appear in coverage
-checks. A plan on the same invariant may carry a hazard's cheap local
-enforcement (a fail-fast assertion, a guard-pinning test) when trivially in
-scope; otherwise hazards stay where they are recorded.
-
-### The fix taxonomy — anti-hardening, in every planner prompt
-
-Ranked. A plan recommending a lower rank must say why the higher ranks don't
-apply:
-
-1. **Remove the possibility** — delete or redesign so the wrong state is
-   unrepresentable. The best fixes shrink the code.
-2. **Correct the predicate** — fix the logic that decides, where it decides.
-3. **Move enforcement to the authoritative boundary** — one owner for the
-   invariant instead of N copies of the check.
-4. **Add a guard** — last resort. Every guard must map to a *demonstrated*
-   failure (a finding with proof), never a speculated one. Speculative
-   defensive code is bloat wearing a safety vest.
-
-### 5. The decision sheet and gate
-
-Generate detailed plans first so LOC estimates and dependencies are stable,
-then render the summary **above** them in both chat and the ledger:
-
-| Plan | Problem → default solution | Covers | Choice | Est. net LOC |
-| ---- | -------------------------- | ------ | ------ | ------------ |
-
-Each problem/solution cell is `**problem headline.**` plus a short observable
-description, then `<br>✅ **Default:**` plus a short solution description.
-`Choice` states `mechanical` or the labels (`A / B`, `accept`, etc.). Put the
-recommended alternative's full net-LOC range in the last column; when choices
-differ materially, show each (`A +8…+14 · B +35…+50`). The table is not an
-index of cryptic titles: it must be understandable without the detail below.
-Follow it with any `PO<n>` portfolio choices, the coverage table, and the
-bloat meter.
-
-Build the table after the detailed estimates, then recompute its totals from
-the displayed rows; never copy a planner's stated total without checking the
-arithmetic. When plans share test infrastructure, label estimates as
-`incremental after FP<n>` and also give the standalone range so portfolio
-comparisons do not double-count or hide work.
-
-Use this fixed icon grammar in every detailed plan. Icons are semantic labels,
-never decoration, and keep the same meaning in chat and the ledger:
-
-- `🚨 Problem` — observable consequence and trigger.
-- `✅ Default` — recommended solution and why it closes the failure.
-- `🔀 Alternative` — another credible choice; omit when none exists.
-- `🔎 Planning detail` — invariant and class sweep for auditability.
-- `📏 Size` — net/touched LOC and test cost.
-- `🧪 Proof` — red proof and neighboring behavior pinned.
-- `⚠️ Trade-offs` — regression surface and residual risk.
-- `🚫 Avoid` — the tempting hotfix or over-hardening move.
-- `🔗 Dependencies` — ordering and file overlap; omit when empty.
-
-Put invariant and class-sweep reasoning under `🔎 Planning detail`, after the
-problem/default pair. Write effect-first, plain words, for the same audience as
-the review skill's Issue text. A reader chooses from the summary and audits the
-reasoning below without opening source.
-
-Example plan block:
-
-> ### FP1 — Keep invoices inside their account · covers CR12-1 (S1/F1 → P1), CR12-4 (S2/F0 → P1)
-> 🚨 **Problem:** Anyone who can guess an invoice id can read another account's
-> invoice because every route checks sign-in but not ownership.
-> ✅ **Default — A: enforce ownership in the shared query.** Add the account
-> predicate once where all invoice reads meet; route-specific checks disappear.
-> 🔎 **Planning detail — invariant:** an invoice is readable only by the account that owns it.
-> **Class sweep:** the same missing-ownership-check shape exists unreported in
-> the CSV export route (in this diff — joins this plan) and in the admin
-> dashboard (pre-dates the diff — recorded, not fixed).
-> 📏 **Size:** A net −4 LOC (+12/−16), 4 files.
-> 🔀 **Alternative B — per-route guards.** Ownership check in each handler. Net +21 LOC.
-> Residual: the next route re-introduces the bug — the class survives.
-> Taxonomy 4; needs a reason A can't ship.
-> 🧪 **Proof:** request another account's invoice id → expect 404; fails today.
-> ⚠️ **Trade-offs:** every invoice read; covered by the red test and existing route tests.
-> 🚫 **Avoid:** patch only the reported route and leave the export path for the
-> next review round to find.
-> **Decision: taste** — default A.
-
-**Gate policy:**
-
-- **Every plan mechanical** → skip the wait: implement immediately and record
-  `gate: auto-approved (all-mechanical)` in the round section.
-- **Any plan taste** → present the *whole* sheet — mechanical plans included —
-  and stop the turn. Wait for one reply that resolves everything; implement
-  nothing before it arrives, mechanical plans included. No partial rounds.
-
-Reply grammar, stated at the bottom of every sheet: `FP1-A, FP3-B, accept
-CR12-9, defer CR12-11` — unmentioned plans take their stated defaults; a bare
-"go" adopts every default, disposition proposals included (they were presented
-as defaults; that is what makes a bare approval informed). An objection to one
-plan re-opens only that plan.
-
-### 6. Implement (fixer subagents)
-
-One fixer per approved plan; waves ordered by declared dependencies, fixers
-with overlapping files serialized, disjoint ones parallel within capacity.
-Each fixer gets the plan verbatim (chosen alternative only), the covered
-findings' full detail, and the mandate limits:
-
-- **Red proof first** for P0/P1: make it fail, then make it pass.
-- **Stay inside the plan's stated surface.** Anything discovered mid-fix —
-  a neighboring bug, a needed refactor, a contract question — is reported
-  back, never fixed on the side.
-- **LOC tripwire:** actual net LOC exceeding ~1.5× the estimate → stop and
-  report, don't push through. A blown estimate means the alternative was
-  wrong-sized; you re-scope it or re-gate it with honest numbers.
-- No test weakening, no speculative fallbacks, no drive-by cleanup.
-
-Fixers return: diffstat, red-then-green evidence, tests run, deviations.
-
-### 7. Verify and close the round
-
-Run the Phase-0 gates; attribute any red against the baseline before acting
-(pre-existing reds are findings, not this round's failure). Then one
-**closure verifier per plan** — fresh, read-only, adversarial: (a) does the
-diff actually restore the stated invariant — hunt a counterexample; (b) does
-it break a neighboring behavior; (c) did the fixer exceed the mandate; and
-(d) is the diff **hardening-shaped** — mostly new conditionals, fallbacks, and
-try/catch rather than corrected logic — which gets flagged in the outcomes
-table even when correct.
-
-A red verdict gets one repair pass by the same fixer. A second red reverts
-that plan's work entirely; its findings return to `open` with the failed
-alternative recorded. Reverting is cheaper than shipping a fix you can't
-prove — and the record forces the next round to plan differently.
-
-### 8. Record, commit, report
-
-Never commit red. Then:
-
-1. One commit per plan where separable — `fix ROUND-<r>/FP<n>: <headline>` —
-   so the ledger maps plan → commit and the next review can attribute;
-   entangled plans share one wave commit naming both.
-2. Update the ledger (statuses, outcomes, verification, dashboard, bloat
-   meter) and append the pointer line to the source CR file; commit these as
-   `fix ROUND-<r>: record` — records only, no code.
-
-**Bloat meter:** cumulative net diffstat of all fix commits vs the original PR
-size, reported every round. Fix rounds should shrink round over round; a fix
-round larger than its predecessor is a divergence warning on the dashboard.
-
-Final message, in this order: the dashboard (new / reopened / verified-closed
-/ standing, LOC trend); what was implemented and skipped, with commits; any
-alarms; residuals if converged; and the next step, printed but never executed:
-*run `infi-code-review` on the branch, then re-invoke this skill on the new CR
-file.*
-
-## Convergence and alarms
-
-Converged: the newest review found zero new or reopened P0/P1 **and** every
-ledger finding is `verified-closed` or dispositioned. Remaining standing items
-go in the final summary as accepted residuals with their `S/F → P` triples.
-
-Alarms — each has a prescribed exit; none gets "one more lap":
-
-- **Reopened once** → the next plan for that invariant must choose a different
-  alternative; the failed one is recorded and off the table.
-- **Reopened twice on one invariant**, or **two consecutive rounds whose new
-  P0/P1 are fix-caused** → stop planning patches for that cluster. Spawn one
-  read-only architect subagent over the ledger history to produce two or three
-  structural options with trade-offs — including the honest option of staying
-  with targeted patches — and put the choice to the user. Record the decision
-  in the ledger as a contract note.
-- **Round cap** — default 4 fix rounds per PR; hitting it is a stop-and-report
-  with the ledger as the handoff, not a failure to hide.
-
-## Hard rules
-
-- The plan's unit is an invariant, never a line. Review `Fix:` hints are
-  inputs; planners re-derive after reading code.
-- Put an effect-first problem immediately beside the default solution in both
-  summary and detail; include checked net LOC in the chat and ledger summary.
-- Every input finding lands in exactly one plan or disposition proposal.
-- Ordinary alternatives keep one finding set. Different grouping is a
-  `PO<n>` portfolio option whose complete selected coverage is validated.
-- Sweep the class before fixing the instance; pre-existing instances are
-  recorded, never fixed.
-- Guards require demonstrated failures; recommending taxonomy 4 requires
-  ruling out 1–3 in writing.
-- Any taste plan present → nothing is implemented before the gate reply.
-  All-mechanical rounds may auto-run.
-- Red proof before fix for every P0/P1.
-- The LOC tripwire stops the fixer; it never pushes through.
-- Never commit red; the records commit carries no code.
-- Never run, re-run, or trigger the review; never push, comment on the PR, or
-  file tickets.
-- The loop improves the change; it never grows it.
+Protect the agreed supported workflows while keeping future changes easy.
+Turn findings into proportionate decisions, then implement and verify the
+chosen corrections when authorized. A useful round may fix, reject, defer,
+or accept findings; clearing every report is not the objective.
+
+Read [the shared review contract](../infi-code-review/references/review-contract.md)
+for evidence, risk, status ownership, dispositions, recurrence, and closure.
+Review-time `Fix:` hints are inputs. Planners derive the solution from the
+current code and the supported guarantee.
+
+One invocation handles one bounded round: reconcile → cluster → plan → apply
+existing authorization or obtain missing decisions → implement → verify →
+record. This skill never launches another review round, pushes, opens PRs,
+comments externally, or files tickets.
+
+## Choose the requested mode
+
+- **Plan-only:** a request to propose, compare, or plan fixes ends with the
+  decision sheet. Planners read code, but do not edit product/test files or run
+  the full verification suite just to estimate work. Record a standalone plan
+  in the ledger unless the user requests discussion only.
+- **Standalone fix:** a request to fix findings includes implementation within
+  the user's stated scope and authorization. Use the standalone ledger and
+  record procedure below. Ask only about unresolved decisions the existing
+  authorization does not cover.
+- **Loop mode:** `infi-review-loop` hands you `phase: plan` or `phase: execute`,
+  a scope/release contract, exact candidate, stable findings and history,
+  baseline results, verification commands, worker budget, and an assigned
+  untracked artifact path. `plan` returns the decision sheet without source
+  edits. `execute` receives the chosen plans and explicit authorization from
+  the loop, then implements and verifies them. Return artifacts and outcomes;
+  never allocate a FIXES ledger, modify CR/ET records, commit, independently
+  change the scope, or ask the user to approve the same choices again.
+
+Keep summaries, plans, verdicts, and evidence in the orchestrator's context;
+use planners, fixers, and fresh verifiers for substantial code inspection.
+Inspect a bounded source excerpt yourself when needed to judge a handoff.
+Schedule workers within the actual capacity; overlapping fixes are sequential.
+
+## Calibrate before planning
+
+1. Resolve the review base: explicit user/workspace base, then the PR's actual
+   base, then the repository default. Record exact base and candidate hashes,
+   including a snapshot of uncommitted changes when present.
+2. Read project instructions and discover its required checks. In standalone
+   fix mode, run the appropriate gates before implementation as a baseline and
+   after implementation. In plan-only mode, identify them without running the
+   full suite. In loop mode, reuse the handed baseline and verification plan.
+3. Resolve the input: an explicit report wins; otherwise use the newest report
+   matching the branch/PR. If none matches, request the missing scope. If the
+   recorded candidate differs, revalidate each finding against the current code.
+4. Establish the supported workflows, release guarantees, known limitations,
+   and maintenance preferences from the request and existing project evidence.
+   State inferred assumptions. Surface unresolved product or trust decisions
+   before selecting dependent solutions; do not invent commitments.
+5. Outside loop mode, resolve the PR number and use `findings/FIXES-PR<id>.md`,
+   or `findings/FIXES-<branch-slug>.md` without a PR. Preserve existing history;
+   number new `ROUND-` sections after the highest existing number.
+6. Record available worker capacity. Planners and verifiers get the same
+   guarantee, scope, and evidence definitions as the orchestrator.
+
+## Reconcile and cluster
+
+Match findings by guarantee and sites, preserving the first ID and later
+aliases. Classify them as new, known-open, standing disposition, or recurrence.
+A standing decision is reconsidered only when material evidence, consequence,
+reach, scope, or an agreed revisit trigger changes; a new numeric label alone
+is not evidence. Diagnose recurrence using the shared contract before choosing
+another approach. Missing an entry point can justify completing a sound design.
+
+Close pending findings only from affirmative closure evidence for the current
+candidate. A later report's silence never closes them. If all release
+obligations are already verified and residuals authorized, update records and
+stop without manufacturing another fix round.
+
+Cluster symptoms of one broken guarantee into one plan. A test gap caused by
+those symptoms becomes that plan's proof obligation. Do not merge unrelated
+bugs merely because they share a module or abstract programming pattern.
+
+Before alternatives, inspect the actual producers, consumers, entry points,
+and relevant error paths of the guarantee. Record which were checked and any
+coverage limits. Additional symptoms inside the agreed scope join the plan.
+Unrelated or pre-existing defects are follow-ups. A minimal change to older
+code may belong in the plan when necessary to restore the in-scope guarantee;
+explain that dependency instead of silently expanding into a repository-wide
+repair.
+
+## Compare durable solutions
+
+Choose the smallest durable correction that satisfies the supported guarantee.
+Prefer designs that reduce caller obligations. A local guard is appropriate
+when it belongs at the boundary and completely handles the demonstrated
+failure. A structural change earns its cost when it resolves demonstrated
+ownership or representation problems. Neither fewer lines nor a redesign is
+inherently the better correction.
+
+For each credible alternative, explain the maintenance change in a short
+paragraph, proportional to the decision:
+
+- **Enforcement:** who owns the rule, and whether that authority spans all
+  relevant contexts, processes, or entry points. One file is not necessarily
+  one writer or one trust boundary.
+- **Caller obligations:** what callers must remember before and after: ordering,
+  preconditions, flags, validation, conversions, or cross-module coordination.
+- **Added and removed complexity:** states, representations, protocols,
+  dependencies, fallbacks, and duplicated decisions. New machinery should
+  replace obsolete machinery where feasible. A justified fix may still add code.
+- **Proportionality:** why the benefit warrants the continuing maintenance cost,
+  given the consequence, reach evidence, recovery, and accepted limitations.
+
+For a rare recoverable failure requiring substantial machinery, explicitly
+compare accepting or documenting the limitation. Do not propose acceptance
+when it contradicts an agreed release requirement without identifying the
+required product decision. Keep genuine defects' severity independent of cost.
+
+## Write the decision sheet
+
+Each plan `FP<n>` includes:
+
+- **Covers:** finding IDs and their S/F → P triples. Every input finding belongs
+  to exactly one plan or disposition; never silently drop an inconvenient one.
+- **Problem:** an effect-first headline and one or two sentences stating the
+  supported workflow, trigger, consequence, recovery, and relevant reach limits.
+- **Default solution:** plain words immediately after the problem, explaining
+  what changes and why it restores the guarantee. Name any supported behavior
+  removed or restricted; distinguish temporary containment from a durable fix.
+- **Planning detail:** the guarantee and its basis, authoritative owner, sibling
+  paths inspected, and recurrence diagnosis when applicable.
+- **Alternatives:** one credible option is enough. Each gives the maintenance
+  assessment above, regression surface, residual risk, and verification cost.
+  Include rough added/removed and touched LOC ranges, separating production
+  code from tests/generated output. Size supports the comparison; it does not
+  determine the preferred option or imply a complete design.
+- **Proof:** the reproduction or test, mapped to the real product call path and
+  the guarantee it verifies, plus relevant neighboring behavior. P0/P1 require
+  red-then-green evidence; if an automated test is infeasible, give the exact
+  repeatable repro and verification limits. Proposed checks are not run results.
+- **Avoid:** a concrete tempting partial fix or disproportionate expansion,
+  when one is relevant; do not invent a warning to fill a template.
+- **Decision and dependencies:** recommendation, `mechanical` or `judgment`,
+  plan ordering, overlapping files, and shared contracts needing integration.
+
+Ordinary alternatives cover the same findings. A structural option regrouping
+several plans is a separate `PO<n>` portfolio option: name the replaced plans,
+union of findings, maintenance tradeoff, combined cost, and proof. Validate
+that every selectable portfolio still covers each finding exactly once.
+Account for shared test infrastructure without double-counting it.
+
+Dispositions use the shared contract and explain why a fix is not selected.
+`Mechanical` means established intended behavior, bounded existing ownership,
+and no unresolved product, support, or architectural choice. There is no LOC
+threshold. Everything requiring a tradeoff is `judgment` (legacy `taste`).
+Neither label overrides the authorization already given by the user.
+
+Render the summary above the detailed plans, understandable without opening
+source:
+
+| Plan | Problem → default solution | Maintenance change | Decision | Size context |
+| ---- | -------------------------- | ------------------ | -------- | ------------ |
+| FP1 | **Reset can lose a later save.** Queue reset with existing writes so their local order is preserved. | Reuses one queue; no new state. Cross-context ordering remains outside this guarantee. | Mechanical; covers CR12-1 (S1/F2 → P1) | Production +5…+10 / −0; tests +15…+25 / −0 |
+
+Use the existing effect-first detailed labels where helpful: `🚨 Problem`,
+`✅ Default`, `🔀 Alternative`, `🔎 Planning detail`, `📏 Size`, `🧪 Proof`,
+`⚠️ Trade-offs`, `🚫 Avoid`, and `🔗 Dependencies`. Put the maintenance
+assessment under Trade-offs. Omit empty labels. Recompute displayed totals
+from the options actually selected; an estimated small diff is not a reason
+for a default that removes the product's core behavior.
+
+## Apply authorization once
+
+Plan-only always ends at the sheet. For implementation, first check the user's
+request and prior decisions. Proceed with choices already authorized; do not
+request confirmation again because the plan is classified as judgment.
+
+For unresolved tradeoffs, present concrete alternatives and their maintenance
+and product consequences. Ask only for the missing decision. Independent
+already-authorized work may continue if it does not constrain that decision.
+In loop mode, return unresolved choices to the loop orchestrator; it alone
+applies the autonomy policy and talks to the user.
+
+When offering a reply such as `FP1-A, FP3-B, accept CR12-9`, state what a bare
+"go" or omitted choice would adopt. Read a partial answer in context; an
+objection is not approval of its dependent work. Record the decision or the
+specific earlier authorization, never infer approval from elapsed time.
+
+## Implement the chosen plans
+
+One fixer owns each guarantee cluster. Serialize overlapping files. Disjoint
+files may still share a lifecycle: merge such assignments or name an integration
+owner and a cross-boundary test before dispatch. No fixer also verifies its own
+closure.
+
+Give fixers the chosen plan, original evidence, supported guarantee, maintenance
+assessment, scope, and exact checks. Require:
+
+- Red proof first for P0/P1, using the real lifecycle and authoritative public
+  interface where applicable. A bundler test does not prove installed native
+  package imports; an isolated queue test does not prove cross-context order.
+- Stay within the plan's surface. Report newly discovered contract questions,
+  neighboring defects, or required structural work before dependent edits.
+- Reassess if implementation introduces an unplanned state, protocol, owner,
+  compatibility path, or broader caller obligation, even below the LOC estimate.
+  A material size overrun calls for inspection and revised estimates; stop only
+  when it exposes a scope or tradeoff change outside existing authorization.
+- No test weakening, speculative fallbacks, or unrelated cleanup.
+
+Return the actual diffstat split by production/tests, red/green evidence,
+commands run, deviations, and actual maintenance changes.
+
+## Verify the complete correction
+
+Run the required gates and relevant surface checks, attributing failures
+against the baseline. In loop mode, execute the handed verification plan once
+for the integrated fixes and return exact results; the outer loop reuses them
+when the tested content is unchanged.
+
+Dispatch a fresh read-only closure verifier for each plan or related integration
+batch, outside the fixer threads. Supply original findings and repros, scope,
+chosen guarantee, accepted maintenance constraints, and candidate, without
+prescribing a conclusion. Require the shared closure contract: explicit actual
+proof, examined sibling entry points,
+neighboring behavior, and whether the implemented maintenance cost matches the
+accepted tradeoff. Distinguish a correct necessary guard from a new fallback
+that preserves ambiguous ownership. Record unverified surfaces as gaps.
+
+A failed verdict gets one bounded repair pass and renewed verification. If it
+fails again, stop that plan, diagnose the cause, and report unresolved work.
+Revert only this round's isolated edits when safe and appropriate; preserve
+user edits and dependent work. Never mark an unproved correction closed to
+satisfy a round limit. Other independently verified plans retain their results.
+
+## Record and finish
+
+**Loop mode:** write the chosen plans, dispositions and their authorization,
+actual changes, tested candidate snapshot, gate results, closure verdicts,
+recurrence diagnoses, and unresolved decisions to the assigned artifact. Return
+it to the loop. No commits or durable-record edits; the loop owns those.
+
+**Standalone:** the FIXES ledger is the sole current status owner. Preserve the
+review snapshots and append one pointer to the ledger if absent. Record:
+
+- Scope/base/candidate, supported release guarantees and limitations.
+- Findings with stable IDs/aliases, S/F → P, status, plan, and fixing commit.
+- Each `ROUND-<n>`: decision sheet, authorization, actual maintenance changes,
+  production/test size context, exact gate results, and closure evidence.
+- Residuals with reasons, authorization, and revisit triggers.
+
+Commit only when the user's request, project workflow, or existing session
+policy authorizes commits. Use one verified commit per separable plan or
+integration batch, followed by a records-only commit to backfill hashes if
+needed. With no commit authorization, leave changes reviewable and record the
+tested snapshot. Never commit a failure introduced by the round. A baseline
+failure remains disclosed and may still prevent release readiness.
+
+Mark `verified-closed` only when the shared evidence requirements are met.
+Otherwise use `fixed — pending verification` and name the missing evidence.
+Do not require a fresh whole-PR review just to change that label.
+
+Report the outcome, implemented and dispositioned findings, maintenance costs
+added/removed, actual verification and limits, links to records, and only the
+next review work justified by changed or unexamined surfaces. Plan-only reports
+the decision sheet and makes clear implementation has not run.
+
+## Stop on evidence, scope, or the round budget
+
+A standalone round ends after its requested phase. Across rounds, convergence
+means verified release guarantees and authorized residuals under the shared
+contract. New suggestions return to triage instead of expanding the release.
+
+Two recurrences on one guarantee, or two consecutive rounds with fix-caused
+failures, require diagnosis before another patch. Distinguish incomplete work,
+later regression, changed contract, and structural inability. If evidence
+points to a structural problem, use a read-only architect to compare credible
+options, including completing the current design or accepting a limitation.
+Do not force a new architecture because a counter increased.
+
+Default standalone budget: four fix rounds per PR unless the user sets another
+limit. The loop's handed budget overrides this in loop mode. A cap ends with
+unresolved work and verification limits reported; it never accepts risks or
+claims the release is ready on the user's behalf.
