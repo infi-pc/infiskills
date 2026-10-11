@@ -53,6 +53,12 @@ frozen frame. The text must supply what the frame cannot:
 
 ## scenario.md template
 
+Keep `<!-- WALKER_STEPS -->` in the walkthrough, including in completed records.
+The bundled driver's `capture` helper inserts each step at that marker after
+writing its screenshot and accessibility snapshot. Remove the example steps
+before the first capture. Before replaying, reset the walkthrough to the marker
+so the new run replaces old steps instead of appending duplicates.
+
 ```markdown
 # Scenario NN: <title>
 
@@ -80,6 +86,7 @@ replay the starting state without reading driver.cjs.
 
 ## Walkthrough
 
+<!-- WALKER_STEPS -->
 1. <User action> — done via <mechanics: click / keyboard / drag from X to Y>.
    Observed: <what happened>. [Shot 01](shots/01-….png) [Ax 01](ax/01-….txt)
    Not visible in shot: <hover state / focus location / animation / timing /

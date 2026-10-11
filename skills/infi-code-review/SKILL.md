@@ -24,23 +24,45 @@ find; you judge.
 
 ## Scope
 
-1. If the user names a PR, branch, or `base:<ref>`, review that diff. Otherwise review the
-   open pull request on the current branch. Its base branch is the diff base:
+1. If the user names a PR, branch, or `base:<ref>`, review that diff. Otherwise resolve the
+   open pull request on the current branch. For a PR, record its number and full base/head
+   SHAs before reviewing (pass the explicit PR selector when one was supplied):
    ```bash
-   gh pr view --json number,baseRefName,headRefOid,title,body,url
-   gh pr diff
-   git diff --stat <base>...HEAD    # changed-file map, drives reviewer routing
-   git log <base>..HEAD --oneline   # intent
+   gh pr view --json number,state,baseRefName,baseRefOid,headRefOid,title,body,url
    ```
-   If the branch has no open PR, discover the repository default with
+   Require `state=OPEN` for the default PR target. If the branch has no open PR, discover
+   the repository default with
    `git symbolic-ref refs/remotes/origin/HEAD` or `gh repo view --json defaultBranchRef`,
-   and review `git diff <default>...HEAD`. Record that assumption. Use `main` only when no
-   default can be discovered.
-2. Do not switch branches, commit, push, open PRs, or file tickets. Leave the working tree
-   exactly as found. When it is dirty, review the PR head plus those uncommitted changes,
-   and say so in the report and the receipt. A SHA alone is not that snapshot.
-3. Review tracked changes by default. Mention untracked files only if they appear relevant.
-4. Infer intent from the request, PR title/body, recent commits, plan docs, and the diff.
+   and pin that base and the local `HEAD`. Record that assumption. Use `main` only when no
+   default can be discovered. Explicit branch/base targets also resolve to full SHAs once.
+2. Fetch missing commit objects from the appropriate remotes without changing the checkout,
+   and verify they match the recorded SHAs. Use those pinned objects for every diff and log:
+   ```bash
+   git merge-base <base-sha> <review-head-sha>  # record as <merge-base-sha>
+   git diff <merge-base-sha> <review-head-sha>
+   git diff --stat <merge-base-sha> <review-head-sha>
+   git log <merge-base-sha>..<review-head-sha> --oneline
+   ```
+   Do not mix a live `gh pr diff` with local `HEAD`: either can differ from the pinned PR.
+3. Compare `git rev-parse HEAD` and `git status --short` with the selected target. Source
+   inspection and checks must use the same snapshot as the diff. A clean checkout at the
+   pinned head can be used directly. Otherwise create a temporary detached worktree at
+   `<review-head-sha>` and give every reviewer that path. Never inspect or run checks in a
+   divergent checkout and attribute the results to the PR. If the pinned source cannot be
+   obtained, report the review as incomplete; checks that cannot run there are "not run."
+4. Include tracked uncommitted changes only when the original checkout's `HEAD` equals
+   the pinned review head. Capture them with `git diff --binary HEAD` (staged and unstaged
+   together), record the patch's SHA-256, and apply it in the temporary worktree with
+   `git apply --index <patch-file>` so newly added files enter its diff too. For this
+   snapshot, generate the diff and file map with `git diff <merge-base-sha>` and
+   `git diff --stat <merge-base-sha>` **in that worktree**; inspect and check it there too.
+   Mark the report and receipt `dirty=yes` and include the patch digest. If local `HEAD`
+   differs, review the pinned target and state that local commits and uncommitted changes
+   were excluded; do not transplant a patch based on another revision.
+5. Do not switch the original checkout's branch, commit, push, open PRs, or file tickets.
+   Leave its working tree and index exactly as found. Review tracked changes by default;
+   mention untracked files only if they appear relevant.
+6. Infer intent from the request, PR title/body, recent commits, plan docs, and the diff.
    Do not infer a new platform, trust, or concurrency guarantee from a hypothetical edge
    case. Do not block on questions unless scope is impossible to infer.
 
@@ -49,8 +71,9 @@ find; you judge.
 Build this card before dispatching anyone, from the repo rather than from this skill.
 Give every reviewer the same card, verbatim — findings are wrong without it.
 
-Read project instructions (`CLAUDE.md`, `AGENTS.md`, `CONTRIBUTING.md`, `.cursorrules`,
-and docs the change points at) and the CI or package manifest. The card has six parts:
+Read project instructions from the selected review snapshot (`CLAUDE.md`, `AGENTS.md`,
+`CONTRIBUTING.md`, `.cursorrules`, and docs the change points at) and the CI or package
+manifest. The card has six parts:
 
 - **Surfaces and blast radius.** Name each user-facing surface and who is hurt when it
   breaks. The same crash is more severe on a public surface than on an operator-only one.
@@ -68,9 +91,10 @@ and docs the change points at) and the CI or package manifest. The card has six 
 - **Cheap checks.** The project's lint, typecheck, and unit-test commands. Run them during
   the review. Record the exact command and result. A check you did not run is "not run."
 
-Carry the base, the head SHA, and whether the tree was dirty. The card's contents stay in
-the target repo. This skill does not ship another project's surfaces, invariants, or ticket
-prefix.
+Carry the pinned base/head SHAs, merge-base SHA, review worktree path, and any included
+patch digest into every reviewer prompt. `dirty` describes the reviewed snapshot, not
+unrelated edits left in the original checkout. This skill does not ship another project's
+surfaces, invariants, or ticket prefix.
 
 ## Review Team
 
@@ -411,10 +435,11 @@ What goes in the collapsed block:
 
 Rules:
 
-- `**Reviewed commit:**` is the full SHA of the commit actually reviewed — the PR head at
-  review time. Never a branch name; a receipt that cannot be tied to a commit is worthless.
+- `**Reviewed commit:**` and trailer `sha` use the pinned review head, never a branch name
+  or a newly queried PR head that was not reviewed.
   When the review included uncommitted changes, set `**Uncommitted changes:** yes` and
-  `dirty=yes` in the trailer. Do not present the SHA as the whole snapshot.
+  `dirty=yes` in the trailer, and add `**Included patch SHA-256:** <digest>` to the body.
+  The verdict and checks cover that combined snapshot, not the committed PR alone.
 - The trailing HTML comment is the machine-readable part. Keep the `sha`, `verdict`,
   `blocking`, and `dirty` keys and their spelling stable. `verdict` is one of `ready`,
   `ready-with-fixes`, `not-ready`.
@@ -423,8 +448,9 @@ Rules:
 - Apply the **`agent-reviewed`** label on every receipt (idempotent — re-applying is a
   no-op). The label means "a documented review exists", not "approved": read the latest
   receipt for the verdict.
-- The label does not expire when new commits land. If the PR has moved on since the last
-  receipt, say so in the report and post a fresh receipt for the new head.
+- The label does not expire when new commits land. Re-read the PR's base/head SHAs before
+  posting. If either differs from the pinned pair, say the review covers an earlier range;
+  keep the original reviewed SHA. Review the new range before posting a verdict for it.
 - Do not post a receipt for a review you did not actually complete, and do not claim
   reviewers or checks that did not run.
 - If `gh` fails (no PR, no auth), report the failure and hand the user the report — do not
@@ -435,6 +461,10 @@ Rules:
 Before delivering, re-check that every finding is actionable, diff-related, accurately
 cited, plausible to fix in this codebase, and not duplicate/speculative/lint-only — and
 that no reported check result was assumed rather than run.
+
+Verify the reviewed source still matches the pinned head plus the recorded patch, if any.
+If it changed during the review, repeat the affected inspection and checks against the
+recorded snapshot before issuing its verdict. Every reported check names that snapshot.
 
 Then re-check the priority arithmetic specifically, because it is the part that silently
 degrades into vibes:
